@@ -1,0 +1,13 @@
+.gradle/
+build/
+/app/build/
+local.properties
+.idea/
+*.iml
+.DS_Store
+/keystore/
+keystore.properties
+/dist/
+.kotlin/
+# MediaPipe models: downloaded by scripts/fetch-models.sh
+app/src/main/assets/*.task

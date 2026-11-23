@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Glowing screen frame with a pointer ring: "the screen is under gesture control". -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <path android:strokeColor="#55D97757" android:strokeWidth="7"
+        android:pathData="M38,30 h32 a6,6 0 0 1 6,6 v36 a6,6 0 0 1 -6,6 h-32 a6,6 0 0 1 -6,-6 v-36 a6,6 0 0 1 6,-6 z" />
+    <path android:strokeColor="#FFF2A65A" android:strokeWidth="2.5"
+        android:pathData="M38,30 h32 a6,6 0 0 1 6,6 v36 a6,6 0 0 1 -6,6 h-32 a6,6 0 0 1 -6,-6 v-36 a6,6 0 0 1 6,-6 z" />
+    <path android:strokeColor="#FFFFFFFF" android:strokeWidth="3"
+        android:pathData="M54,47 m-8,0 a8,8 0 1 0 16,0 a8,8 0 1 0 -16,0" />
+    <path android:fillColor="#FFD97757"
+        android:pathData="M54,47 m-3,0 a3,3 0 1 0 6,0 a3,3 0 1 0 -6,0" />
+    <path android:strokeColor="#FFFFFFFF" android:strokeWidth="2.5" android:strokeLineCap="round"
+        android:pathData="M44,64 q10,6 20,0" />
+</vector>

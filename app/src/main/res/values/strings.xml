@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AirControl</string>
+    <string name="a11y_label">AirControl gestures</string>
+    <string name="a11y_summary">Lets hand gestures seen by the camera tap, swipe and navigate.</string>
+    <string name="a11y_description">AirControl turns hand gestures seen by the camera into taps, swipes, drags and Back/Home/Recents. It draws a glowing border and a pointer while gesture mode is on. It does not read the content of your screen, and camera frames are processed on the device only.</string>
+</resources>
