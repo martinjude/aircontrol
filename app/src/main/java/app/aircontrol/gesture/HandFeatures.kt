@@ -1,11 +1,14 @@
 package app.aircontrol.gesture
 
 import kotlin.math.abs
+import kotlin.math.atan2
 import kotlin.math.sqrt
 
 /** MediaPipe hand landmark indices. */
 object HandLm {
     const val WRIST = 0
+    const val THUMB_CMC = 1
+    const val THUMB_MCP = 2
     const val THUMB_IP = 3
     const val THUMB_TIP = 4
     const val INDEX_MCP = 5
@@ -107,15 +110,57 @@ class HandFeatures private constructor(val pts: List<P3>, world: List<P3>?) {
         pts[HandLm.WRIST].dist(pts[HandLm.INDEX_TIP]) /
             pts[HandLm.WRIST].dist(pts[HandLm.INDEX_MCP]).coerceAtLeast(1e-4f)
 
-    /** Number of extended fingers among index, middle, ring, pinky. */
-    val extendedFingers: Int = FINGERS.count { (pip, tip) ->
+    /**
+     * Index-finger extension used by the click detector: |wrist→tip| / |wrist→knuckle| (≈2 straight,
+     * ≈1 curled). Measured on the metric world landmarks when available so that a finger pointing at
+     * the camera (foreshortened in the image) still reads correctly.
+     */
+    val indexExt: Float = run {
+        val src = world?.takeIf { it.size >= 21 } ?: pts
+        src[HandLm.WRIST].dist(src[HandLm.INDEX_TIP]) / src[HandLm.WRIST].dist(src[HandLm.INDEX_MCP]).coerceAtLeast(1e-4f)
+    }
+
+    /** Extended state of index, middle, ring and pinky (tip clearly farther from the wrist than the PIP joint). */
+    val fingerUp: BooleanArray = BooleanArray(4) { i ->
+        val (pip, tip) = FINGERS[i]
         pts[HandLm.WRIST].dist(pts[tip]) > pts[HandLm.WRIST].dist(pts[pip]) * 1.1f
+    }
+
+    /** Number of extended fingers among index, middle, ring, pinky. */
+    val extendedFingers: Int = fingerUp.count { it }
+
+    /** Thumb held out straight, away from the palm (as opposed to tucked or folded across it). */
+    val thumbOut: Boolean = run {
+        val cmc = pts[HandLm.THUMB_CMC]; val mcp = pts[HandLm.THUMB_MCP]; val ip = pts[HandLm.THUMB_IP]; val tip = pts[HandLm.THUMB_TIP]
+        val path = cmc.dist(mcp) + mcp.dist(ip) + ip.dist(tip)
+        val straight = if (path > 1e-6f) cmc.dist(tip) / path else 0f
+        val away = tip.dist(pts[HandLm.INDEX_MCP]) / palmSize
+        straight >= THUMB_STRAIGHT_MIN && away >= THUMB_AWAY_MIN
     }
 
     val openPalm: Boolean get() = extendedFingers >= 4 && pinchRatio > 0.5f
 
     /** Index finger extended (pointing pose). */
     val pointing: Boolean get() = indexReach > 1.5f
+
+    /**
+     * Angle in the image plane between the wrist→middle-knuckle axis and straight up, 0..180°.
+     * 0 = fingers up, 90 = fingers sideways, 180 = fingers down.
+     */
+    val tiltDeg: Float = run {
+        val v = pts[HandLm.MIDDLE_MCP] - pts[HandLm.WRIST]
+        Math.toDegrees(atan2(abs(v.x).toDouble(), -v.y.toDouble())).toFloat()
+    }
+
+    /** Length of the palm axis in the image plane over its 3D length: low when the hand points at the camera. */
+    val uprightProjection: Float = run {
+        val v = pts[HandLm.MIDDLE_MCP] - pts[HandLm.WRIST]
+        (sqrt(v.x * v.x + v.y * v.y) / palmSize).coerceIn(0f, 1f)
+    }
+
+    /** Hand held upright (fingers up) so that the thumb–index plane faces the camera: needed to start a pinch. */
+    fun upright(maxTiltDeg: Float, minProjection: Float): Boolean =
+        tiltDeg <= maxTiltDeg && uprightProjection >= minProjection
 
     /** Flat hand seen edge-on, or null. */
     fun blade(minAxis: Float): BladeAxis? {
@@ -129,7 +174,10 @@ class HandFeatures private constructor(val pts: List<P3>, world: List<P3>?) {
     }
 
     companion object {
-        private val PALM = intArrayOf(HandLm.WRIST, HandLm.INDEX_MCP, HandLm.MIDDLE_MCP, HandLm.RING_MCP, HandLm.PINKY_MCP)
+        /** Thumb straightness (tip distance over bone-path length) and distance from the index knuckle (palm sizes). */
+        private const val THUMB_STRAIGHT_MIN = 0.80f
+        private const val THUMB_AWAY_MIN = 0.50f
+        private val PALM =intArrayOf(HandLm.WRIST, HandLm.INDEX_MCP, HandLm.MIDDLE_MCP, HandLm.RING_MCP, HandLm.PINKY_MCP)
         private val FINGERS = listOf(
             HandLm.INDEX_PIP to HandLm.INDEX_TIP,
             HandLm.MIDDLE_PIP to HandLm.MIDDLE_TIP,

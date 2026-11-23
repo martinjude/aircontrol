@@ -6,6 +6,7 @@ import android.os.SystemClock
 import android.util.Log
 import app.aircontrol.gesture.FrameObservation
 import app.aircontrol.gesture.HandObservation
+import app.aircontrol.gesture.HandSide
 import app.aircontrol.gesture.P3
 import app.aircontrol.gesture.PoseObservation
 import app.aircontrol.gesture.Signs
@@ -40,6 +41,8 @@ class VisionPipeline(
     @Volatile var mirror = true
     @Volatile var poseEnabled = true
     @Volatile var poseEvery = 3
+    /** Flips the detected left/right hand (safety switch in case the label comes out inverted). */
+    @Volatile var swapHands = false
 
     var delegateName = ""
         private set
@@ -187,6 +190,19 @@ class VisionPipeline(
         val inference = submitted?.let { SystemClock.uptimeMillis() - it } ?: 0L
         val hands = result.landmarks().mapIndexed { i, lms ->
             val g = result.gestures().getOrNull(i)?.firstOrNull()
+            // MediaPipe assumes a mirrored (selfie) image for its Left/Right label. The frames analysed here
+            // are never mirrored, so the label is inverted: flip it (unless the user swapped it back).
+            val label = result.handedness().getOrNull(i)?.firstOrNull()?.categoryName()
+            val flipped = when (label) {
+                "Left" -> HandSide.RIGHT
+                "Right" -> HandSide.LEFT
+                else -> HandSide.ANY
+            }
+            val side = if (swapHands) when (flipped) {
+                HandSide.LEFT -> HandSide.RIGHT
+                HandSide.RIGHT -> HandSide.LEFT
+                HandSide.ANY -> HandSide.ANY
+            } else flipped
             HandObservation(
                 landmarks = lms.map { it.toP3() },
                 gesture = g?.categoryName()?.takeIf { it.isNotEmpty() } ?: Signs.NONE,
@@ -194,6 +210,7 @@ class VisionPipeline(
                 world = result.worldLandmarks().getOrNull(i)?.map { w ->
                     if (mirror) P3(-w.x(), w.y(), w.z()) else P3(w.x(), w.y(), w.z())
                 },
+                side = side,
             )
         }
         val poseObs = latestPose?.takeIf { poseEnabled && ts - latestPoseTs < 500 }

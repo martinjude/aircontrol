@@ -153,6 +153,7 @@ class TrackingService : LifecycleService(), FrameSink, VisionPipeline.Listener {
         val p = VisionPipeline(this, this).apply {
             mirror = settings.mirror
             poseEnabled = settings.usePose
+            swapHands = settings.swapHands
         }
         pipeline = p
         val accel = settings.accelerator
@@ -198,6 +199,7 @@ class TrackingService : LifecycleService(), FrameSink, VisionPipeline.Listener {
         pipeline?.apply {
             mirror = s.mirror
             poseEnabled = s.usePose
+            swapHands = s.swapHands
         }
         applyEngineConfig()
         if (s.sourceKey() != old.sourceKey() || s.source != old.source) {
@@ -245,6 +247,7 @@ class TrackingService : LifecycleService(), FrameSink, VisionPipeline.Listener {
         val p = VisionPipeline(this, this).apply {
             mirror = settings.mirror
             poseEnabled = settings.usePose
+            swapHands = settings.swapHands
         }
         pipeline = p
         val accel = settings.accelerator
@@ -269,7 +272,7 @@ class TrackingService : LifecycleService(), FrameSink, VisionPipeline.Listener {
     override fun wantsFrame(nowMs: Long): Boolean {
         val p = pipeline
         if (!running || !screenOn || p == null || !p.ready || p.busy(nowMs)) return false
-        val fast = armed || ControlBus.preview.subscriptionCount.value > 0
+        val fast = armed || ControlBus.preview.subscriptionCount.value > 0 || ControlBus.snapshot.subscriptionCount.value > 0
         val interval = 1000L / (if (fast) ARMED_FPS else IDLE_FPS)
         if (nowMs - lastAcceptedMs < interval - 4) return false
         lastAcceptedMs = nowMs
@@ -286,40 +289,42 @@ class TrackingService : LifecycleService(), FrameSink, VisionPipeline.Listener {
 
     override fun onObservation(obs: FrameObservation, frame: Bitmap, inferenceMs: Long) {
         if (!running) return
+        val snapshotWanted = ControlBus.snapshot.subscriptionCount.value > 0
+        val previewWanted = ControlBus.preview.subscriptionCount.value > 0
         engineThread.execute {
             engine.process(obs)
-            if (engine.debugSign != loggedSign) {
-                loggedSign = engine.debugSign
+            val dbg = engine.debug
+            if (dbg.sign != loggedSign) {
+                loggedSign = dbg.sign
                 Log.i(TAG, "sign $loggedSign (hands=${obs.hands.size}, body=${engine.bodyVisible})")
+            }
+            // Published from the engine thread so landmarks and the engine's verdict are of the same frame.
+            if (snapshotWanted || previewWanted) {
+                val snap = TrackingSnapshot(obs.timestampMs, obs.imageAspect, obs.hands, obs.pose, dbg)
+                ControlBus.snapshot.value = snap
+                val now = SystemClock.uptimeMillis()
+                if (previewWanted && now - lastPreviewMs > 60) {
+                    lastPreviewMs = now
+                    ControlBus.preview.value = PreviewFrame(frame, settings.mirror, snap)
+                }
             }
         }
 
         val now = SystemClock.uptimeMillis()
         if (statStart == 0L) statStart = now
         statFrames++
-        val snapshotWanted = ControlBus.snapshot.subscriptionCount.value > 0
-        val previewWanted = ControlBus.preview.subscriptionCount.value > 0
-        if (snapshotWanted || previewWanted) {
-            val snap = TrackingSnapshot(obs.timestampMs, obs.aspect(), obs.hands, obs.pose)
-            if (snapshotWanted) ControlBus.snapshot.value = snap
-            if (previewWanted && now - lastPreviewMs > 60) {
-                lastPreviewMs = now
-                ControlBus.preview.value = PreviewFrame(frame, settings.mirror, snap)
-            }
-        }
         if (now - lastStateMs > 250) {
             lastStateMs = now
             val elapsed = (now - statStart).coerceAtLeast(1)
             val fps = statFrames * 1000f / elapsed
             if (elapsed > 2000) { statStart = now; statFrames = 0 }
+            val dbg = engine.debug
             ControlBus.state.update {
                 it.copy(
                     fps = fps,
                     inferenceMs = inferenceMs,
-                    sign = engine.debugSign,
-                    pinch = engine.debugPinch,
-                    push = engine.debugPush,
-                    blade = engine.debugBlade,
+                    sign = dbg.sign,
+                    pinch = dbg.pinch,
                     handVisible = obs.hands.isNotEmpty(),
                     bodyVisible = engine.bodyVisible,
                     sourceError = false,
@@ -327,8 +332,6 @@ class TrackingService : LifecycleService(), FrameSink, VisionPipeline.Listener {
             }
         }
     }
-
-    private fun FrameObservation.aspect() = imageAspect
 
     override fun onPipelineError(message: String) {
         Log.e(TAG, message)

@@ -85,7 +85,7 @@ class MainActivity : ComponentActivity() {
 }
 
 private enum class Tab(val icon: String, val label: String) {
-    HOME("🤟", "Control"), CAMERA("📷", "Camera"), SETTINGS("⚙️", "Settings"), HELP("❔", "Help")
+    HOME("🤟", "Control"), CAMERA("📷", "Camera"), BINDS("🖐", "Binds"), SETTINGS("⚙️", "Settings"), HELP("❔", "Help")
 }
 
 @Composable
@@ -121,8 +121,9 @@ private fun AirApp() {
             when (tab) {
                 Tab.HOME -> HomeScreen(settings)
                 Tab.CAMERA -> CameraScreen(settings, repo)
+                Tab.BINDS -> BindsScreen(settings, repo)
                 Tab.SETTINGS -> SettingsScreen(settings, repo)
-                Tab.HELP -> HelpScreen()
+                Tab.HELP -> HelpScreen(settings)
             }
             Spacer(Modifier.height(8.dp))
         }
@@ -335,7 +336,7 @@ private fun TestCard(enabled: Boolean, running: Boolean, armed: Boolean, launch:
             }) { Text("Drag ↑") }
             listOf(SystemAction.BACK to "Back", SystemAction.HOME to "Home", SystemAction.RECENTS to "Recents").forEach { (a, l) ->
                 OutlinedButton(enabled = enabled, onClick = {
-                    delayed(l) { ControlBus.events.tryEmit(ControlEvent.Global(a)) }
+                    delayed(l) { ControlBus.events.tryEmit(ControlEvent.BindFired(a, null, a.label)) }
                 }) { Text(l) }
             }
         }

@@ -21,6 +21,9 @@ fun mid(a: P3, b: P3) = P3((a.x + b.x) / 2f, (a.y + b.y) / 2f, (a.z + b.z) / 2f)
 fun lerp(a: Float, b: Float, t: Float) = a + (b - a) * t
 fun lerp(a: P3, b: P3, t: Float) = P3(lerp(a.x, b.x, t), lerp(a.y, b.y, t), lerp(a.z, b.z, t))
 
+/** Which of the user's hands. [ANY] doubles as "unknown" on an observation and "either" in a bind. */
+enum class HandSide { ANY, LEFT, RIGHT }
+
 /**
  * One tracked hand. [landmarks] are the 21 MediaPipe hand landmarks in normalized image
  * coordinates (x, y in 0..1, z relative depth on roughly the same scale as x), expressed in the
@@ -32,6 +35,8 @@ data class HandObservation(
     val gestureScore: Float,
     /** MediaPipe hand world landmarks (metres, hand-centred, x mirrored like [landmarks]), if available. */
     val world: List<P3>? = null,
+    /** The user's left/right hand, [HandSide.ANY] when unknown. */
+    val side: HandSide = HandSide.ANY,
 )
 
 /** The 33 MediaPipe pose landmarks (same coordinate convention as [HandObservation]). */
@@ -60,8 +65,25 @@ object Signs {
     const val POINTING_UP = "Pointing_Up"
 }
 
-/** [RECENTER] is handled inside the engine (makes the next pointing position the screen centre). */
-enum class SystemAction { NONE, BACK, HOME, RECENTS, NOTIFICATIONS, QUICK_SETTINGS, RECENTER }
+/** What a bind can do. Executed by the accessibility service (`ActionRunner`). */
+enum class SystemAction(val label: String) {
+    NONE("Nothing"),
+    BACK("Back"),
+    HOME("Home"),
+    RECENTS("Recents"),
+    NOTIFICATIONS("Notifications"),
+    QUICK_SETTINGS("Quick settings"),
+    LOCK_SCREEN("Lock screen"),
+    SCREENSHOT("Screenshot"),
+    POWER_MENU("Power menu"),
+    MEDIA_PLAY_PAUSE("Play / pause"),
+    MEDIA_NEXT("Next track"),
+    MEDIA_PREVIOUS("Previous track"),
+    VOLUME_UP("Volume up"),
+    VOLUME_DOWN("Volume down"),
+    MUTE("Mute"),
+    LAUNCH_APP("Open an app"),
+}
 
 enum class SwipeDir {
     UP, DOWN, LEFT, RIGHT;
@@ -78,15 +100,13 @@ enum class BladeAxis { VERTICAL, HORIZONTAL }
 
 enum class DisarmReason { GESTURE, TIMEOUT, MANUAL }
 
-enum class AnchorMode { BODY, HAND }
-
 /** Events produced by [GestureEngine]. Coordinates are normalized to the screen (0..1). */
 sealed interface ControlEvent {
     /** Progress of holding the arm/disarm sign; 0 means the hold was abandoned. */
     data class ArmProgress(val progress: Float, val disarming: Boolean) : ControlEvent
     data object Armed : ControlEvent
     data class Disarmed(val reason: DisarmReason) : ControlEvent
-    /** [press] is the push-to-click progress (0..1) while a push is in progress; the pointer is frozen then. */
+    /** [press] is the click progress (0..1) while the index finger is curling. */
     data class Pointer(
         val x: Float,
         val y: Float,
@@ -97,19 +117,20 @@ sealed interface ControlEvent {
     data class TouchDown(val x: Float, val y: Float) : ControlEvent
     data class TouchMove(val x: Float, val y: Float) : ControlEvent
     data class TouchUp(val x: Float, val y: Float) : ControlEvent
-    data class Tap(val x: Float, val y: Float) : ControlEvent
+    /** A tap; [click] = it came from the index-curl click (otherwise from a quick pinch). */
+    data class Tap(val x: Float, val y: Float, val click: Boolean = false) : ControlEvent
     data class Swipe(val dir: SwipeDir) : ControlEvent
     /**
      * Swipe mode: [axis] non-null = armed for strokes along it. With a null axis, [progress] > 0 is
      * the flat-hand hold building up and 0 means swipe mode is off.
      */
     data class SwipeMode(val axis: SwipeAxis?, val progress: Float = if (axis != null) 1f else 0f) : ControlEvent
-    /** Recenter sign fired; the next steady pointing position becomes the screen centre. */
-    data object RecenterPending : ControlEvent
-    data object Recentered : ControlEvent
-    /** Progress of holding a system sign; 0 means abandoned. */
-    data class SignProgress(val action: SystemAction, val progress: Float) : ControlEvent
-    data class Global(val action: SystemAction) : ControlEvent
+    /** Progress of holding a bind's gesture; 0 means abandoned. */
+    data class BindProgress(val label: String, val progress: Float) : ControlEvent
+    /** A bind fired: perform [action] ([appPackage] for [SystemAction.LAUNCH_APP]). */
+    data class BindFired(val action: SystemAction, val appPackage: String?, val label: String) : ControlEvent
+    /** The click detector rejected a curl; for the preview / tuning only. */
+    data class ClickRejected(val reason: String) : ControlEvent
 }
 
 data class EngineConfig(
@@ -123,45 +144,42 @@ data class EngineConfig(
     val signScoreMin: Float = 0.55f,
     /** Classification may flicker; gaps shorter than this don't break a hold. */
     val signGapMs: Long = 200,
-    val signActions: Map<String, SystemAction> = mapOf(
-        Signs.THUMB_DOWN to SystemAction.BACK,
-        Signs.CLOSED_FIST to SystemAction.HOME,
-        Signs.VICTORY to SystemAction.RECENTS,
-        Signs.THUMB_UP to SystemAction.RECENTER,
-    ),
-    val signHoldMs: Map<String, Long> = mapOf(
-        Signs.THUMB_DOWN to 500,
-        Signs.CLOSED_FIST to 800,
-        Signs.VICTORY to 600,
-        Signs.THUMB_UP to 600,
-    ),
+    val binds: List<Bind> = Binds.defaults(),
 
     /** Thumb-tip/index-tip distance over palm size: below enter = pinched, above exit = released. */
     val pinchEnter: Float = 0.30f,
     val pinchExit: Float = 0.45f,
     /** Rejects fists: index tip must reach this far from the wrist (relative to the index knuckle). */
     val pinchMinIndexReach: Float = 1.15f,
+    /** A pinch only starts with the hand upright: wrist→knuckle within this angle of straight up. */
+    val pinchMaxTiltDeg: Float = 45f,
+    /** Once pinched, the hand may tilt this far before the touch is released. */
+    val pinchHoldTiltDeg: Float = 75f,
+    /** 2D/3D length of the palm axis; low when the hand points at the camera. */
+    val pinchMinUpright: Float = 0.5f,
     val tapMaxMs: Long = 280,
     val dragSlopDp: Float = 22f,
     /** Touch-down uses the pointer position from this long before the pinch closed (closing drift). */
-    val touchLookbackMs: Long = 140,
+    val touchLookbackMs: Long = 80,
 
-    // Push-to-click: a quick jab of the pointing hand towards the camera (hand grows in the image).
-    /** ln(hand scale) slope (1/s) that starts a press and freezes the pointer. */
-    val pushOnsetRate: Float = 0.5f,
-    /** Peak slope the press must reach: a slow lean-in is not a click. */
-    val pushMinPeakRate: Float = 0.8f,
-    /** Growth of ln(hand scale) since the press began that clicks (0.10 ≈ hand 10 % closer). */
-    val pushMinGrowth: Float = 0.10f,
-    val pushMaxMs: Long = 320,
-    /** Palm travel in the image plane during a press, in palm sizes, above which it is not a click. */
-    val pushMaxLateral: Float = 0.8f,
-    /** The click lands where the pointer was this long before the press began (drift compensation). */
-    val pushLookbackMs: Long = 60,
-    val pushRefractoryMs: Long = 350,
-    /** After a click the pointer stays frozen while the hand is pulled back, at most this long. */
-    val pushRecoverMaxMs: Long = 450,
-    val pushSensitivity: Float = 1f,
+    // Click: the index finger curls and straightens again (fires on the release).
+    /** Reach (≈2 extended, ≈1 curled) must fall at least this far below its recent maximum. */
+    val clickMinDrop: Float = 0.30f,
+    /** The dip starts being tracked after this fall. */
+    val clickOnsetDrop: Float = 0.12f,
+    /** Fraction of the dip that must be regained for the release. */
+    val clickRecovery: Float = 0.6f,
+    val clickMinDipMs: Long = 80,
+    /** Time from the start of the curl to the release; slower = a pose change, not a click. */
+    val clickMaxMs: Long = 450,
+    /** The finger must have been at least this extended just before (a real pointing finger). */
+    val clickMinBaseline: Float = 1.5f,
+    /** Palm travel during the curl, in palm sizes, above which it is not a click. */
+    val clickMaxLateral: Float = 0.6f,
+    /** The click lands where the pointer was this long before the curl began. */
+    val clickLookbackMs: Long = 60,
+    val clickRefractoryMs: Long = 300,
+    val clickSensitivity: Float = 1f,
 
     // Armed swipes: hold a flat hand edge-on, then stroke.
     /** |palm normal component| needed to count as a vertical/horizontal blade. */
@@ -177,22 +195,57 @@ data class EngineConfig(
     val flickAxisRatio: Float = 1.5f,
     val swipeCooldownMs: Long = 450,
     val swipeOppositeBlockMs: Long = 900,
-    val swipeSensitivity: Float = 1f,
+    val swipeSensitivity: Float = 0.7f,
 
-    val recenterTimeoutMs: Long = 3000,
-    val recenterSteadyMs: Long = 150,
-
-    val pointerSensitivity: Float = 1f,
+    /** Camera frame → screen gain around the centre; 1 = camera edges are the screen edges. */
+    val pointerGain: Float = 1f,
     /** 0 = raw/fast, 1 = very smooth. */
     val smoothing: Float = 0.5f,
-    val anchorMode: AnchorMode = AnchorMode.BODY,
 
     val autoDisarmMs: Long = 20_000,
     val handLostGraceMs: Long = 350,
     val requireBody: Boolean = false,
 ) {
     val dragSlopPx: Float get() = dragSlopDp * density
-    val pushGrowth: Float get() = pushMinGrowth / pushSensitivity.coerceIn(0.25f, 4f)
-    fun holdFor(sign: String): Long = signHoldMs[sign] ?: 600
-    fun actionFor(sign: String): SystemAction = signActions[sign] ?: SystemAction.NONE
+    val clickNeeded: Float get() = clickMinDrop / clickSensitivity.coerceIn(0.25f, 4f)
 }
+
+/** One immutable snapshot of what the engine currently sees and decides, for the live preview. */
+data class EngineDebug(
+    val t: Long = 0,
+    val armed: Boolean = false,
+    val hands: Int = 0,
+    val side: HandSide = HandSide.ANY,
+    /** Raw MediaPipe sign of the active hand. */
+    val sign: String = Signs.NONE,
+    val pose: Pose? = null,
+    /** Cursor reference (palm centre) in user-view camera coordinates, 0..1. */
+    val palmU: Float = 0.5f,
+    val palmV: Float = 0.5f,
+    /** Where the pointer is on the screen, 0..1. */
+    val cursorU: Float = 0.5f,
+    val cursorV: Float = 0.5f,
+    val gain: Float = 1f,
+    val pinch: Float = 0f,
+    val pinchEnter: Float = 0f,
+    val pinchExit: Float = 0f,
+    /** The hand is in a pose from which a pinch would start (upright, index extended). */
+    val pinchReady: Boolean = false,
+    /** IDLE / PENDING / DRAGGING. */
+    val touch: String = "IDLE",
+    val tiltDeg: Float = 0f,
+    val upright: Boolean = false,
+    /** Index-finger reach (≈2 extended, ≈1 curled) and the recent maximum it is compared with. */
+    val reach: Float = 0f,
+    val reachBaseline: Float = 0f,
+    val curlNeeded: Float = 0f,
+    val curlDepth: Float = 0f,
+    val clickState: String = "IDLE",
+    /** Time since the last click was detected (also while disarmed), [Long.MAX_VALUE] = never. */
+    val clickAgoMs: Long = Long.MAX_VALUE,
+    val blade: String = "-",
+    val swipeAxis: SwipeAxis? = null,
+    val bindLabel: String? = null,
+    val bindProgress: Float = 0f,
+    val bodyVisible: Boolean = false,
+)

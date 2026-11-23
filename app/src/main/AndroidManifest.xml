@@ -4,6 +4,14 @@
 
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
 
+    <!-- Lets the Binds screen list launchable apps and "open an app" binds start them. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
+
     <uses-permission android:name="android.permission.CAMERA" />
     <!-- Network/IP camera streams on the local network. -->
     <uses-permission android:name="android.permission.INTERNET" />

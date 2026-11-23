@@ -5,6 +5,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -22,6 +24,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -34,6 +37,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlin.math.abs
 
 @Composable
 fun SectionCard(title: String? = null, modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
@@ -73,7 +77,10 @@ fun SwitchRow(title: String, subtitle: String? = null, checked: Boolean, onChang
     }
 }
 
-/** Slider that only persists on release. */
+/**
+ * Slider that only persists on release. With a [default] it shows a small "reset" button whenever
+ * the value differs from it.
+ */
 @Composable
 fun SettingSlider(
     title: String,
@@ -81,12 +88,20 @@ fun SettingSlider(
     range: ClosedFloatingPointRange<Float>,
     steps: Int = 0,
     format: (Float) -> String,
+    default: Float? = null,
     onChange: (Float) -> Unit,
 ) {
     var local by remember(value) { mutableFloatStateOf(value) }
     Column {
-        Row(Modifier.fillMaxWidth()) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(title, Modifier.weight(1f), fontSize = 16.sp)
+            if (default != null && abs(local - default) > 1e-3f) {
+                TextButton(
+                    onClick = { local = default; onChange(default) },
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                    modifier = Modifier.height(28.dp),
+                ) { Text("reset to ${format(default)}", fontSize = 12.sp) }
+            }
             Text(format(local), color = AirColors.Muted, fontSize = 14.sp)
         }
         Slider(

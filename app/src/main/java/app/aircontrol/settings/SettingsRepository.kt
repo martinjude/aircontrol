@@ -9,9 +9,10 @@ import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
-import app.aircontrol.gesture.AnchorMode
+import app.aircontrol.gesture.Bind
+import app.aircontrol.gesture.BindCodec
+import app.aircontrol.gesture.Binds
 import app.aircontrol.gesture.EngineConfig
-import app.aircontrol.gesture.Signs
 import app.aircontrol.gesture.SystemAction
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -19,6 +20,11 @@ import kotlinx.coroutines.flow.map
 
 enum class SourceType { FRONT, BACK, NETWORK }
 enum class Accelerator { AUTO, GPU, CPU }
+
+/** Size of the on-screen tracking preview (width in dp). */
+enum class PreviewSize(val label: String, val widthDp: Float) {
+    SMALL("Small", 130f), MEDIUM("Medium", 190f), LARGE("Large", 260f)
+}
 
 enum class GlowPreset(val label: String, val colors: IntArray) {
     CORAL("Coral", intArrayOf(0xFFD97757.toInt(), 0xFFF2A65A.toInt(), 0xFFFF8A65.toInt(), 0xFFE8607A.toInt(), 0xFFD97757.toInt())),
@@ -36,37 +42,32 @@ data class AppSettings(
     val networkRotation: Int = 0,
     val accelerator: Accelerator = Accelerator.AUTO,
     val usePose: Boolean = true,
-    val anchorMode: AnchorMode = AnchorMode.BODY,
-    val pointerSensitivity: Float = 1f,
+    /** Camera → screen gain: 1 = the camera edges are the screen edges. */
+    val pointerGain: Float = 1f,
     val smoothing: Float = 0.5f,
-    val swipeSensitivity: Float = 1f,
-    val pushSensitivity: Float = 1f,
+    val clickSensitivity: Float = 1f,
+    /** How far from upright (degrees) the hand may be to start a pinch. */
+    val pinchTiltDeg: Float = 45f,
+    val swipeSensitivity: Float = 0.7f,
     val swipeLength: Float = 0.4f,
     val autoDisarmSec: Int = 20,
-    val thumbDownAction: SystemAction = SystemAction.BACK,
-    val fistAction: SystemAction = SystemAction.HOME,
-    val victoryAction: SystemAction = SystemAction.RECENTS,
-    val thumbUpAction: SystemAction = SystemAction.RECENTER,
+    val swapHands: Boolean = false,
+    val binds: List<Bind> = Binds.defaults(),
     val glow: GlowPreset = GlowPreset.CORAL,
-    val showSkeleton: Boolean = false,
-    val showHud: Boolean = false,
+    val showPreview: Boolean = false,
+    val previewSize: PreviewSize = PreviewSize.MEDIUM,
+    val previewImage: Boolean = false,
+    val showLog: Boolean = true,
     val requireBody: Boolean = false,
 ) {
-    val signActions: Map<String, SystemAction>
-        get() = mapOf(
-            Signs.THUMB_DOWN to thumbDownAction,
-            Signs.CLOSED_FIST to fistAction,
-            Signs.VICTORY to victoryAction,
-            Signs.THUMB_UP to thumbUpAction,
-        )
-
     fun applyTo(base: EngineConfig): EngineConfig = base.copy(
-        signActions = signActions,
-        pointerSensitivity = pointerSensitivity,
+        binds = binds,
+        pointerGain = pointerGain,
         smoothing = smoothing,
         swipeSensitivity = swipeSensitivity,
-        pushSensitivity = pushSensitivity,
-        anchorMode = if (usePose) anchorMode else AnchorMode.HAND,
+        clickSensitivity = clickSensitivity,
+        pinchMaxTiltDeg = pinchTiltDeg,
+        pinchHoldTiltDeg = pinchTiltDeg + 30f,
         autoDisarmMs = autoDisarmSec * 1000L,
         requireBody = requireBody && usePose,
     )
@@ -96,27 +97,44 @@ class SettingsRepository(context: Context) {
         val networkRotation = intPreferencesKey("network_rotation")
         val accelerator = stringPreferencesKey("accelerator")
         val usePose = booleanPreferencesKey("use_pose")
-        val anchorMode = stringPreferencesKey("anchor_mode")
-        val pointerSensitivity = floatPreferencesKey("pointer_sensitivity")
+        val pointerGain = floatPreferencesKey("pointer_gain")
         val smoothing = floatPreferencesKey("smoothing")
         val swipeSensitivity = floatPreferencesKey("swipe_sensitivity")
-        val pushSensitivity = floatPreferencesKey("push_sensitivity")
+        val clickSensitivity = floatPreferencesKey("click_sensitivity")
+        val pinchTilt = floatPreferencesKey("pinch_tilt")
         val version = intPreferencesKey("settings_version")
         val swipeLength = floatPreferencesKey("swipe_length")
         val autoDisarmSec = intPreferencesKey("auto_disarm_sec")
-        val thumbDown = stringPreferencesKey("sign_thumb_down")
-        val fist = stringPreferencesKey("sign_fist")
-        val victory = stringPreferencesKey("sign_victory")
-        val thumbUp = stringPreferencesKey("sign_thumb_up")
+        val swapHands = booleanPreferencesKey("swap_hands")
+        val binds = stringPreferencesKey("binds")
         val glow = stringPreferencesKey("glow")
-        val showSkeleton = booleanPreferencesKey("show_skeleton")
-        val showHud = booleanPreferencesKey("show_hud")
+        val showPreview = booleanPreferencesKey("show_preview")
+        val previewSize = stringPreferencesKey("preview_size")
+        val previewImage = booleanPreferencesKey("preview_image")
+        val showLog = booleanPreferencesKey("show_log")
         val requireBody = booleanPreferencesKey("require_body")
+
+        // v2 keys, only read to migrate.
+        val legacyThumbDown = stringPreferencesKey("sign_thumb_down")
+        val legacyFist = stringPreferencesKey("sign_fist")
+        val legacyVictory = stringPreferencesKey("sign_victory")
+        val legacyThumbUp = stringPreferencesKey("sign_thumb_up")
+        val legacyShowSkeleton = booleanPreferencesKey("show_skeleton")
+        val legacyShowHud = booleanPreferencesKey("show_hud")
     }
 
     private fun Preferences.toSettings(): AppSettings {
         val d = AppSettings()
         val version = this[K.version] ?: 1
+        // v2 persisted its old tuning defaults; v3 has new defaults and a new meaning for the swipe/click values.
+        val migrated = version < SETTINGS_VERSION
+        val binds = this[K.binds]?.let { BindCodec.decode(it) } ?: Binds.legacy(
+            thumbDown = enumOr(this[K.legacyThumbDown], SystemAction.BACK),
+            fist = enumOr(this[K.legacyFist], SystemAction.HOME),
+            victory = enumOr(this[K.legacyVictory], SystemAction.RECENTS),
+            // v2 used 👍 for recenter, which no longer exists (enumOr then falls back to nothing).
+            thumbUp = enumOr(this[K.legacyThumbUp], SystemAction.NONE),
+        )
         return AppSettings(
             source = enumOr(this[K.source], d.source),
             networkUrl = this[K.networkUrl] ?: d.networkUrl,
@@ -124,22 +142,20 @@ class SettingsRepository(context: Context) {
             networkRotation = this[K.networkRotation] ?: d.networkRotation,
             accelerator = enumOr(this[K.accelerator], d.accelerator),
             usePose = this[K.usePose] ?: d.usePose,
-            anchorMode = enumOr(this[K.anchorMode], d.anchorMode),
-            pointerSensitivity = this[K.pointerSensitivity] ?: d.pointerSensitivity,
+            pointerGain = this[K.pointerGain] ?: d.pointerGain,
             smoothing = this[K.smoothing] ?: d.smoothing,
-            swipeSensitivity = this[K.swipeSensitivity] ?: d.swipeSensitivity,
-            pushSensitivity = this[K.pushSensitivity] ?: d.pushSensitivity,
+            clickSensitivity = this[K.clickSensitivity] ?: d.clickSensitivity,
+            pinchTiltDeg = this[K.pinchTilt] ?: d.pinchTiltDeg,
+            swipeSensitivity = if (migrated) d.swipeSensitivity else this[K.swipeSensitivity] ?: d.swipeSensitivity,
             swipeLength = this[K.swipeLength] ?: d.swipeLength,
             autoDisarmSec = this[K.autoDisarmSec] ?: d.autoDisarmSec,
-            thumbDownAction = enumOr(this[K.thumbDown], d.thumbDownAction),
-            fistAction = enumOr(this[K.fist], d.fistAction),
-            victoryAction = enumOr(this[K.victory], d.victoryAction),
-            // v1 stored "Nothing" for thumb up; v2 makes it the recenter sign.
-            thumbUpAction = enumOr(this[K.thumbUp], d.thumbUpAction)
-                .let { if (version < SETTINGS_VERSION && it == SystemAction.NONE) SystemAction.RECENTER else it },
+            swapHands = this[K.swapHands] ?: d.swapHands,
+            binds = binds,
             glow = enumOr(this[K.glow], d.glow),
-            showSkeleton = this[K.showSkeleton] ?: d.showSkeleton,
-            showHud = this[K.showHud] ?: d.showHud,
+            showPreview = this[K.showPreview] ?: ((this[K.legacyShowSkeleton] ?: false) || (this[K.legacyShowHud] ?: false)),
+            previewSize = enumOr(this[K.previewSize], d.previewSize),
+            previewImage = this[K.previewImage] ?: d.previewImage,
+            showLog = this[K.showLog] ?: d.showLog,
             requireBody = this[K.requireBody] ?: d.requireBody,
         )
     }
@@ -151,26 +167,26 @@ class SettingsRepository(context: Context) {
         this[K.networkRotation] = s.networkRotation
         this[K.accelerator] = s.accelerator.name
         this[K.usePose] = s.usePose
-        this[K.anchorMode] = s.anchorMode.name
-        this[K.pointerSensitivity] = s.pointerSensitivity
+        this[K.pointerGain] = s.pointerGain
         this[K.smoothing] = s.smoothing
         this[K.swipeSensitivity] = s.swipeSensitivity
-        this[K.pushSensitivity] = s.pushSensitivity
+        this[K.clickSensitivity] = s.clickSensitivity
+        this[K.pinchTilt] = s.pinchTiltDeg
         this[K.version] = SETTINGS_VERSION
         this[K.swipeLength] = s.swipeLength
         this[K.autoDisarmSec] = s.autoDisarmSec
-        this[K.thumbDown] = s.thumbDownAction.name
-        this[K.fist] = s.fistAction.name
-        this[K.victory] = s.victoryAction.name
-        this[K.thumbUp] = s.thumbUpAction.name
+        this[K.swapHands] = s.swapHands
+        this[K.binds] = BindCodec.encode(s.binds)
         this[K.glow] = s.glow.name
-        this[K.showSkeleton] = s.showSkeleton
-        this[K.showHud] = s.showHud
+        this[K.showPreview] = s.showPreview
+        this[K.previewSize] = s.previewSize.name
+        this[K.previewImage] = s.previewImage
+        this[K.showLog] = s.showLog
         this[K.requireBody] = s.requireBody
     }
 
     private companion object {
-        const val SETTINGS_VERSION = 2
+        const val SETTINGS_VERSION = 3
     }
 
     private inline fun <reified E : Enum<E>> enumOr(name: String?, default: E): E =

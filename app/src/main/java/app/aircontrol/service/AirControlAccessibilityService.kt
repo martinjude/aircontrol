@@ -4,7 +4,6 @@ import android.accessibilityservice.AccessibilityService
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import app.aircontrol.gesture.ControlEvent
-import app.aircontrol.gesture.SystemAction
 import app.aircontrol.overlay.OverlayController
 import app.aircontrol.settings.SettingsRepository
 import kotlinx.coroutines.CoroutineScope
@@ -31,6 +30,7 @@ class AirControlAccessibilityService : AccessibilityService() {
     private var scope: CoroutineScope? = null
     private var overlay: OverlayController? = null
     private var dispatcher: GestureDispatcher? = null
+    private var actions: ActionRunner? = null
     private var debugJob: Job? = null
     @Volatile private var swipeLength = 0.4f
 
@@ -38,6 +38,7 @@ class AirControlAccessibilityService : AccessibilityService() {
         super.onServiceConnected()
         val ov = OverlayController(this)
         val gd = GestureDispatcher(this)
+        actions = ActionRunner(this)
         val sc = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
         overlay = ov
         dispatcher = gd
@@ -47,33 +48,40 @@ class AirControlAccessibilityService : AccessibilityService() {
             SettingsRepository(this@AirControlAccessibilityService).flow.collect { s ->
                 swipeLength = s.swipeLength
                 ov.view.colors = s.glow.colors
-                ov.view.showHud = s.showHud
-                ov.view.showSkeleton = s.showSkeleton
-                setDebugFeeds(s.showHud || s.showSkeleton)
+                ov.view.previewSize = s.previewSize
+                ov.view.previewImage = s.previewImage
+                ov.view.showLog = s.showLog
+                ov.view.showPreview = s.showPreview
+                setDebugFeeds(s.showPreview, s.previewImage)
             }
         }
         connectedFlow.value = true
     }
 
-    private fun setDebugFeeds(enabled: Boolean) {
+    private var debugImage = false
+
+    private fun setDebugFeeds(enabled: Boolean, image: Boolean) {
         val sc = scope ?: return
         val ov = overlay ?: return
-        if (enabled == (debugJob != null)) return
+        if (enabled == (debugJob != null) && (!enabled || image == debugImage)) return
+        debugJob?.cancel()
+        debugJob = null
+        debugImage = image
         if (enabled) {
             debugJob = sc.launch {
                 launch { ControlBus.snapshot.collect { ov.view.snapshot = it } }
                 launch {
                     ControlBus.state.collect { s ->
-                        ov.view.hudState = s
+                        ov.view.trackingState = s
                         ov.keepAlive = s.running
                     }
                 }
+                if (image) launch { ControlBus.preview.collect { ov.view.previewFrame = it } }
             }
         } else {
-            debugJob?.cancel()
-            debugJob = null
             ov.keepAlive = false
             ov.view.snapshot = null
+            ov.view.previewFrame = null
         }
     }
 
@@ -82,7 +90,7 @@ class AirControlAccessibilityService : AccessibilityService() {
         val gd = dispatcher ?: return
         ov.onEvent(e)
         if (e !is ControlEvent.Pointer && e !is ControlEvent.TouchMove && e !is ControlEvent.ArmProgress &&
-            e !is ControlEvent.SignProgress && !(e is ControlEvent.SwipeMode && e.axis == null)
+            e !is ControlEvent.BindProgress && !(e is ControlEvent.SwipeMode && e.axis == null)
         ) {
             Log.i(TAG, "action $e")
         }
@@ -95,22 +103,12 @@ class AirControlAccessibilityService : AccessibilityService() {
             is ControlEvent.TouchMove -> gd.touchMove(e.x * w, e.y * h)
             is ControlEvent.TouchUp -> gd.touchUp(e.x * w, e.y * h)
             is ControlEvent.Swipe -> gd.swipe(e.dir, size.x, size.y, swipeLength)
-            is ControlEvent.Global -> performGlobal(e.action)
+            is ControlEvent.BindFired -> if (actions?.run(e.action, e.appPackage) == false) {
+                Log.w(TAG, "bind action ${e.action} (${e.appPackage}) failed")
+            }
             is ControlEvent.Disarmed -> gd.cancel()
             else -> {}
         }
-    }
-
-    private fun performGlobal(action: SystemAction) {
-        val code = when (action) {
-            SystemAction.BACK -> GLOBAL_ACTION_BACK
-            SystemAction.HOME -> GLOBAL_ACTION_HOME
-            SystemAction.RECENTS -> GLOBAL_ACTION_RECENTS
-            SystemAction.NOTIFICATIONS -> GLOBAL_ACTION_NOTIFICATIONS
-            SystemAction.QUICK_SETTINGS -> GLOBAL_ACTION_QUICK_SETTINGS
-            SystemAction.NONE, SystemAction.RECENTER -> return
-        }
-        performGlobalAction(code)
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
@@ -125,6 +123,7 @@ class AirControlAccessibilityService : AccessibilityService() {
         overlay?.detach()
         overlay = null
         dispatcher = null
+        actions = null
         super.onDestroy()
     }
 }

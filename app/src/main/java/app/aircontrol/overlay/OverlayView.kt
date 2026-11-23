@@ -7,6 +7,7 @@ import android.graphics.BlurMaskFilter
 import android.graphics.Canvas
 import android.graphics.ComposeShader
 import android.graphics.Color
+import android.graphics.DashPathEffect
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Path
@@ -23,16 +24,20 @@ import android.view.WindowInsets
 import app.aircontrol.gesture.ControlEvent
 import app.aircontrol.gesture.DisarmReason
 import app.aircontrol.gesture.HandLm
+import app.aircontrol.gesture.HandSide
+import app.aircontrol.gesture.PointerMap
 import app.aircontrol.gesture.PoseLm
 import app.aircontrol.gesture.SwipeAxis
 import app.aircontrol.gesture.SwipeDir
-import app.aircontrol.gesture.SystemAction
+import app.aircontrol.service.PreviewFrame
 import app.aircontrol.service.TrackingSnapshot
 import app.aircontrol.service.TrackingState
 import app.aircontrol.settings.GlowPreset
+import app.aircontrol.settings.PreviewSize
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.exp
+import kotlin.math.min
 import kotlin.math.sin
 
 /**
@@ -50,18 +55,28 @@ class OverlayView(context: Context) : View(context) {
             invalidate()
         }
 
-    var showHud = false
+    // Live tracking preview (panel in a screen corner).
+    var showPreview = false
         set(value) { field = value; invalidate() }
-    var showSkeleton = false
+    var previewSize = PreviewSize.MEDIUM
         set(value) { field = value; invalidate() }
-    var hudState: TrackingState? = null
-        set(value) { field = value; if (showHud) invalidate() }
+    var previewImage = false
+        set(value) { field = value; invalidate() }
+    var showLog = true
+        set(value) { field = value; invalidate() }
+    var trackingState: TrackingState? = null
+        set(value) { field = value; if (showPreview) invalidate() }
+    var previewFrame: PreviewFrame? = null
     var snapshot: TrackingSnapshot? = null
-        set(value) { field = value; if (showSkeleton) invalidate() }
+        set(value) {
+            field = value
+            if (value != null) recordSnapshot(value)
+            if (showPreview) invalidate()
+        }
 
     val isIdle: Boolean
         get() = armedTarget == 0f && armedLevel < 0.001f && pointerAlpha < 0.001f && ripples.isEmpty() &&
-            swipeDir == null && swipeAxis == null && signAction == null && flashAction == null && pillAlpha < 0.001f && now() > pillUntil
+            swipeDir == null && swipeAxis == null && bindLabel == null && flashLabel == null && pillAlpha < 0.001f && now() > pillUntil
 
     private val density = resources.displayMetrics.density
     private fun dp(v: Float) = v * density
@@ -104,9 +119,9 @@ class OverlayView(context: Context) : View(context) {
     private var swipeAxis: SwipeAxis? = null
     private var swipePill = false
 
-    private var signAction: SystemAction? = null
-    private var signProgress = 0f
-    private var flashAction: SystemAction? = null
+    private var bindLabel: String? = null
+    private var bindProgress = 0f
+    private var flashLabel: String? = null
     private var flashStart = 0L
 
     private var pillText: String? = null
@@ -149,6 +164,7 @@ class OverlayView(context: Context) : View(context) {
                 armedTarget = 1f
                 armedAtMs = t
                 showPill("Gesture control ON  ·  🤟 to stop", -1f, 2200)
+                logLine("armed", Color.WHITE)
             }
             is ControlEvent.Disarmed -> {
                 armedTarget = 0f
@@ -158,7 +174,8 @@ class OverlayView(context: Context) : View(context) {
                 swipeAxis = null
                 swipePill = false
                 trail.clear()
-                signAction = null
+                bindLabel = null
+                logLine("disarmed (${e.reason.name.lowercase()})", Color.WHITE)
                 showPill(
                     if (e.reason == DisarmReason.TIMEOUT) "No hand seen  ·  gesture control OFF" else "Gesture control OFF",
                     -1f, 1600,
@@ -179,16 +196,27 @@ class OverlayView(context: Context) : View(context) {
                     trail.clear()
                 }
             }
-            is ControlEvent.Tap -> ripples += Ripple(e.x, e.y, t, big = true)
-            is ControlEvent.TouchDown -> ripples += Ripple(e.x, e.y, t, big = false)
+            is ControlEvent.Tap -> {
+                ripples += Ripple(e.x, e.y, t, big = true)
+                logLine(if (e.click) "click  (%.0f%%, %.0f%%)".format(e.x * 100, e.y * 100) else "pinch tap", COLOR_OK)
+            }
+            is ControlEvent.TouchDown -> {
+                ripples += Ripple(e.x, e.y, t, big = false)
+                logLine("touch down", COLOR_OK)
+            }
             is ControlEvent.TouchMove -> {}
-            is ControlEvent.TouchUp -> trail.clear()
-            is ControlEvent.Swipe -> { swipeDir = e.dir; swipeStart = t }
+            is ControlEvent.TouchUp -> { trail.clear(); logLine("touch up", COLOR_OK) }
+            is ControlEvent.Swipe -> {
+                swipeDir = e.dir; swipeStart = t
+                logLine("swipe ${e.dir.name.lowercase()}", COLOR_OK)
+            }
+            is ControlEvent.ClickRejected -> logLine("click ✗ ${e.reason}", COLOR_WARN)
             is ControlEvent.SwipeMode -> when {
                 e.axis != null -> {
                     swipeAxis = e.axis
                     showPill(if (e.axis == SwipeAxis.HORIZONTAL) "Swipe armed  ⟷" else "Swipe armed  ↕", -1f, Long.MAX_VALUE / 4)
                     swipePill = true
+                    logLine("swipe armed ${if (e.axis == SwipeAxis.HORIZONTAL) "⟷" else "↕"}", Color.WHITE)
                 }
                 e.progress > 0f -> {
                     swipeAxis = null
@@ -201,22 +229,16 @@ class OverlayView(context: Context) : View(context) {
                     swipePill = false
                 }
             }
-            ControlEvent.RecenterPending -> {
-                showPill("👍  Point where the centre should be", -1f, 3000)
+            is ControlEvent.BindProgress -> if (e.progress > 0f) {
+                bindLabel = e.label; bindProgress = e.progress
+            } else if (bindLabel == e.label) {
+                bindLabel = null
             }
-            ControlEvent.Recentered -> {
-                ripples += Ripple(0.5f, 0.5f, t, big = true)
-                showPill("Pointer centred", -1f, 1200)
-            }
-            is ControlEvent.SignProgress -> if (e.progress > 0f) {
-                signAction = e.action; signProgress = e.progress
-            } else if (signAction == e.action) {
-                signAction = null
-            }
-            is ControlEvent.Global -> {
-                signAction = null
-                flashAction = e.action
+            is ControlEvent.BindFired -> {
+                bindLabel = null
+                flashLabel = e.label
                 flashStart = t
+                logLine("bind: ${e.label}", COLOR_OK)
             }
         }
         invalidate()
@@ -283,8 +305,7 @@ class OverlayView(context: Context) : View(context) {
         if (drawSwipe(canvas, t)) animating = true
         if (drawSign(canvas, t)) animating = true
         if (drawPill(canvas, t, dt)) animating = true
-        if (showSkeleton) drawSkeleton(canvas)
-        if (showHud) drawHud(canvas)
+        if (showPreview) drawPreview(canvas, t)
 
         when {
             animating -> postInvalidateOnAnimation()
@@ -494,7 +515,7 @@ class OverlayView(context: Context) : View(context) {
         val cx = if (pointerAlpha > 0.1f) px else width / 2f
         val cy = if (pointerAlpha > 0.1f) py else height / 2f
         var animating = false
-        signAction?.let { action ->
+        bindLabel?.let { label ->
             rect.set(cx - dp(30f), cy - dp(30f), cx + dp(30f), cy + dp(30f))
             stroke.strokeWidth = dp(5f)
             stroke.color = Color.BLACK
@@ -502,18 +523,18 @@ class OverlayView(context: Context) : View(context) {
             c.drawArc(rect, 0f, 360f, false, stroke)
             stroke.color = accent
             stroke.alpha = 255
-            c.drawArc(rect, -90f, 360f * signProgress, false, stroke)
-            drawLabel(c, label(action), cx, cy + dp(56f), 1f)
+            c.drawArc(rect, -90f, 360f * bindProgress, false, stroke)
+            drawLabel(c, label, cx, cy + dp(56f), 1f)
         }
-        flashAction?.let { action ->
+        flashLabel?.let { label ->
             val e = (t - flashStart) / 700f
             if (e >= 1f) {
-                flashAction = null
+                flashLabel = null
             } else {
                 fill.color = accent
                 fill.alpha = (150 * (1f - e)).toInt()
                 c.drawCircle(cx, cy, dp(30f) + dp(26f) * e, fill)
-                drawLabel(c, label(action), cx, cy + dp(56f), 1f - e)
+                drawLabel(c, label, cx, cy + dp(56f), 1f - e)
                 animating = true
             }
         }
@@ -562,76 +583,380 @@ class OverlayView(context: Context) : View(context) {
         c.drawText(msg, cx - tw / 2f, cy - (text.descent() + text.ascent()) / 2f, text)
     }
 
-    private fun drawSkeleton(c: Canvas) {
-        val snap = snapshot ?: return
-        val cw = dp(140f)
-        val ch = cw / snap.aspect.coerceIn(0.4f, 2.5f)
-        val right = width - dp(16f)
-        val bottom = height - bottomInset - dp(16f)
-        rect.set(right - cw, bottom - ch, right, bottom)
-        fill.color = 0xFF14110F.toInt()
-        fill.alpha = 190
-        c.drawRoundRect(rect, dp(14f), dp(14f), fill)
+    // ---------------------------------------------------------------- live preview
+
+    private class LogLine(val text: String, val t: Long, val color: Int)
+    private val log = ArrayDeque<LogLine>()
+
+    private fun logLine(text: String, color: Int) {
+        log.addLast(LogLine(text, now(), color))
+        while (log.size > LOG_KEEP) log.removeFirst()
+    }
+
+    // Index-finger reach history for the sparkline (ring buffer, oldest at [sparkIdx]).
+    private val reachHist = FloatArray(SPARK_N) { Float.NaN }
+    private val clickMark = BooleanArray(SPARK_N)
+    private var sparkIdx = 0
+    private var lastSnapT = Long.MIN_VALUE
+    private var lastClickTime = Long.MIN_VALUE
+    private var panelLeft = false
+    private var panelFlipT = 0L
+
+    private val small = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        textSize = dp(9f)
+        typeface = Typeface.MONOSPACE
+    }
+    private val dash = DashPathEffect(floatArrayOf(dp(4f), dp(3f)), 0f)
+    private val bmpPaint = Paint(Paint.FILTER_BITMAP_FLAG)
+    private val rect2 = RectF()
+
+    private fun recordSnapshot(s: TrackingSnapshot) {
+        val d = s.debug
+        if (d.t == lastSnapT) return
+        lastSnapT = d.t
+        reachHist[sparkIdx] = if (d.hands > 0) d.reach else Float.NaN
+        val clickTime = if (d.clickAgoMs == Long.MAX_VALUE) Long.MIN_VALUE else d.t - d.clickAgoMs
+        val isNew = clickTime != Long.MIN_VALUE && clickTime != lastClickTime
+        clickMark[sparkIdx] = isNew
+        if (isNew) {
+            lastClickTime = clickTime
+            if (!d.armed) logLine("click detected (not armed)", COLOR_OK)
+        }
+        sparkIdx = (sparkIdx + 1) % SPARK_N
+    }
+
+    private fun sideLabel(s: HandSide) = when (s) {
+        HandSide.LEFT -> "L"
+        HandSide.RIGHT -> "R"
+        HandSide.ANY -> "?"
+    }
+
+    /**
+     * One panel in a screen corner (it hops to the other corner when the pointer gets under it):
+     * mini camera view with skeleton, the palm cursor reference and the camera region that maps to the
+     * screen; meters for pinch / click / bind with their thresholds; an index-reach sparkline; an event log.
+     */
+    private fun drawPreview(c: Canvas, t: Long) {
+        val snap = snapshot
+        val d = snap?.debug
+        val st = trackingState
+        val hands = snap?.hands.orEmpty()
+        val pad = dp(8f)
+        val w = dp(previewSize.widthDp)
+        val innerW = w - 2 * pad
+        val aspect = (snap?.aspect ?: 0.75f).coerceIn(0.4f, 2.5f)
+        val boxW = min(innerW, innerW * 1.1f * aspect)
+        val boxH = boxW / aspect
+        val rowH = dp(15f)
+        val meterH = dp(26f)
+        val sparkH = dp(38f)
+        val h = pad + rowH + boxH + dp(3f) + rowH + dp(3f) + meterH * 3 + dp(3f) + sparkH + pad
+        val bottom = height - bottomInset - dp(10f)
+        val top = bottom - h
+        var left = if (panelLeft) dp(10f) else width - w - dp(10f)
+        if (pointerAlpha > 0.1f && px in (left - dp(28f))..(left + w + dp(28f)) &&
+            py in (top - dp(28f))..(bottom + dp(28f)) && t - panelFlipT > 900
+        ) {
+            panelLeft = !panelLeft
+            panelFlipT = t
+            left = if (panelLeft) dp(10f) else width - w - dp(10f)
+        }
+        val ix = left + pad
+
         stroke.shader = null
-        stroke.strokeWidth = dp(1.5f)
-        fun x(u: Float) = rect.left + u.coerceIn(0f, 1f) * cw
-        fun y(v: Float) = rect.top + v.coerceIn(0f, 1f) * ch
-        snap.pose?.let { pose ->
+        stroke.pathEffect = null
+        rect.set(left, top, left + w, bottom)
+        fill.color = 0xFF14110F.toInt()
+        fill.alpha = 252
+        c.drawRoundRect(rect, dp(14f), dp(14f), fill)
+        stroke.strokeWidth = dp(1f)
+        stroke.color = accent
+        stroke.alpha = 70
+        c.drawRoundRect(rect, dp(14f), dp(14f), stroke)
+
+        // Header: armed state, hands, speed.
+        var y = top + pad
+        val armedNow = d?.armed == true
+        fill.color = if (armedNow) COLOR_OK else 0xFF8A8480.toInt()
+        fill.alpha = 255
+        c.drawCircle(ix + dp(4f), y + rowH / 2f, dp(3.5f), fill)
+        small.color = Color.WHITE
+        small.alpha = 255
+        c.drawText(if (armedNow) "ARMED" else "idle", ix + dp(12f), y + rowH * 0.7f, small)
+        val badge = when {
+            hands.isEmpty() -> "no hand"
+            else -> hands.joinToString("+") { sideLabel(it.side) }
+        }
+        small.color = if (hands.isEmpty()) 0xFF8A8480.toInt() else accent
+        val badgeX = ix + dp(12f) + small.measureText("ARMED") + dp(8f)
+        c.drawText(badge, badgeX, y + rowH * 0.7f, small)
+        if (st != null) {
+            val speed = if (previewSize == PreviewSize.SMALL) "%.0ffps".format(st.fps) else "%.0ffps %dms".format(st.fps, st.inferenceMs)
+            small.color = 0xFFB8B0A8.toInt()
+            c.drawText(speed, left + w - pad - small.measureText(speed), y + rowH * 0.7f, small)
+        }
+        y += rowH
+
+        // Camera view.
+        val bx = left + (w - boxW) / 2f
+        val by = y
+        rect.set(bx, by, bx + boxW, by + boxH)
+        fill.color = Color.BLACK
+        fill.alpha = 240
+        c.drawRoundRect(rect, dp(8f), dp(8f), fill)
+        c.save()
+        path.reset()
+        path.addRoundRect(rect, dp(8f), dp(8f), Path.Direction.CW)
+        c.clipPath(path)
+        previewFrame?.takeIf { previewImage }?.let { pf ->
+            c.save()
+            if (pf.mirrored) c.scale(-1f, 1f, rect.centerX(), rect.centerY())
+            bmpPaint.alpha = 150
+            c.drawBitmap(pf.bitmap, null, rect, bmpPaint)
+            c.restore()
+        }
+        fun mx(u: Float) = bx + u.coerceIn(0f, 1f) * boxW
+        fun my(v: Float) = by + v.coerceIn(0f, 1f) * boxH
+        // The camera region that spans the whole screen (the whole view at 1.0x).
+        val hs = PointerMap.halfSpan(d?.gain ?: 1f)
+        stroke.pathEffect = dash
+        stroke.strokeWidth = dp(1.2f)
+        stroke.color = accent
+        stroke.alpha = 160
+        c.drawRect(mx(0.5f - hs), my(0.5f - hs), mx(0.5f + hs), my(0.5f + hs), stroke)
+        stroke.pathEffect = null
+        snap?.pose?.let { pose ->
             stroke.color = Color.WHITE
-            stroke.alpha = 120
+            stroke.alpha = 90
+            stroke.strokeWidth = dp(1.4f)
             for ((a, b) in PoseLm.UPPER_BODY) {
                 if (pose.visibility[a] < 0.5f || pose.visibility[b] < 0.5f) continue
-                c.drawLine(x(pose.landmarks[a].x), y(pose.landmarks[a].y), x(pose.landmarks[b].x), y(pose.landmarks[b].y), stroke)
+                c.drawLine(mx(pose.landmarks[a].x), my(pose.landmarks[a].y), mx(pose.landmarks[b].x), my(pose.landmarks[b].y), stroke)
             }
         }
-        for (hand in snap.hands) {
-            stroke.color = accent
-            stroke.alpha = 230
+        stroke.strokeWidth = dp(1.6f)
+        for (hand in hands) {
             for ((a, b) in HandLm.CONNECTIONS) {
+                stroke.color = when (b) {
+                    in 1..4 -> COLOR_THUMB
+                    in 6..8 -> accent
+                    else -> Color.WHITE
+                }
+                stroke.alpha = 230
                 val pa = hand.landmarks[a]; val pb = hand.landmarks[b]
-                c.drawLine(x(pa.x), y(pa.y), x(pb.x), y(pb.y), stroke)
+                c.drawLine(mx(pa.x), my(pa.y), mx(pb.x), my(pb.y), stroke)
+            }
+            fill.color = COLOR_THUMB
+            fill.alpha = 255
+            c.drawCircle(mx(hand.landmarks[HandLm.THUMB_TIP].x), my(hand.landmarks[HandLm.THUMB_TIP].y), dp(2.2f), fill)
+            fill.color = accent
+            c.drawCircle(mx(hand.landmarks[HandLm.INDEX_TIP].x), my(hand.landmarks[HandLm.INDEX_TIP].y), dp(2.6f), fill)
+        }
+        if (d != null && hands.isNotEmpty()) {
+            val cx = mx(d.palmU)
+            val cy = my(d.palmV)
+            if (d.pinch < d.pinchEnter) {
+                // Thumb and index tips touching on the hand that drives the cursor.
+                val hand = hands.minBy { abs(it.landmarks[HandLm.MIDDLE_MCP].x - d.palmU) + abs(it.landmarks[HandLm.MIDDLE_MCP].y - d.palmV) }
+                val a = hand.landmarks[HandLm.THUMB_TIP]; val b = hand.landmarks[HandLm.INDEX_TIP]
+                stroke.color = if (d.pinchReady) COLOR_OK else COLOR_WARN
+                stroke.alpha = 255
+                stroke.strokeWidth = dp(2.4f)
+                c.drawLine(mx(a.x), my(a.y), mx(b.x), my(b.y), stroke)
+            }
+            // The cursor reference: the centre of the palm.
+            stroke.strokeWidth = dp(1.3f)
+            stroke.color = Color.WHITE
+            stroke.alpha = 150
+            c.drawLine(cx - dp(11f), cy, cx + dp(11f), cy, stroke)
+            c.drawLine(cx, cy - dp(11f), cx, cy + dp(11f), stroke)
+            stroke.alpha = 255
+            c.drawCircle(cx, cy, dp(5.5f), stroke)
+            fill.color = accent
+            c.drawCircle(cx, cy, dp(2.4f), fill)
+            val ago = d.clickAgoMs
+            if (ago < CLICK_FLASH_MS) {
+                val k = ago / CLICK_FLASH_MS.toFloat()
+                stroke.color = COLOR_OK
+                stroke.strokeWidth = dp(2.2f)
+                stroke.alpha = (255 * (1f - k)).toInt()
+                c.drawCircle(cx, cy, dp(6f) + dp(16f) * k, stroke)
             }
         }
-        if (snap.hands.isEmpty()) {
-            mono.alpha = 160
-            c.drawText("no hand", rect.left + dp(10f), rect.bottom - dp(10f), mono)
+        c.restore()
+        y += boxH + dp(3f)
+
+        // Pose chips.
+        small.alpha = 255
+        small.color = Color.WHITE
+        val poseText = when {
+            d == null || hands.isEmpty() -> "–"
+            d.pose != null -> "${d.pose.emoji} ${d.pose.label.substringBefore(" (").substringBefore(",")}"
+            d.sign == "ILoveYou" -> "🤟 arm sign"
+            d.sign == "Pointing_Up" -> "☝️ point"
+            d.sign != "None" -> "· ${d.sign}"
+            else -> "·"
         }
-    }
+        c.drawText(poseText, ix, y + rowH * 0.7f, small)
+        if (d != null && d.touch != "IDLE") {
+            small.color = accent
+            val tt = if (d.touch == "DRAGGING") "DRAG" else "PINCH"
+            c.drawText(tt, left + w - pad - small.measureText(tt), y + rowH * 0.7f, small)
+        }
+        y += rowH + dp(3f)
 
-    private fun drawHud(c: Canvas) {
-        val s = hudState ?: return
-        val lines = listOf(
-            "AirControl ${if (s.armed) "ARMED" else "idle"}",
-            "%.0f fps  %d ms  %s".format(s.fps, s.inferenceMs, s.delegate),
-            "sign ${s.sign}  pinch %.2f".format(s.pinch),
-            "push %+.3f  blade ${s.blade}".format(s.push),
-            "hand ${if (s.handVisible) "yes" else "no"}  body ${if (s.bodyVisible) "yes" else "no"}",
-            s.sourceStatus.take(38),
+        // Meters with their thresholds.
+        val have = d != null && hands.isNotEmpty()
+        val touching = d != null && d.touch != "IDLE"
+        val pinchColor = when {
+            !have -> 0xFF8A8480.toInt()
+            touching -> COLOR_OK
+            d!!.pinch < d.pinchEnter && !d.pinchReady -> COLOR_WARN
+            d.pinchReady -> accent
+            else -> 0xFF8A8480.toInt()
+        }
+        drawMeter(
+            c, ix, y, innerW, "pinch",
+            if (have) "%.2f %s".format(d!!.pinch, if (d.upright) "upright" else "tilt ${d.tiltDeg.toInt()}°") else "–",
+            if (have) 1f - d!!.pinch / PINCH_SCALE else 0f,
+            if (d != null) floatArrayOf(1f - d.pinchEnter / PINCH_SCALE, 1f - d.pinchExit / PINCH_SCALE) else null,
+            pinchColor,
         )
-        val lh = dp(15f)
-        val left = dp(14f)
-        val top = topInset + dp(64f)
-        rect.set(left - dp(8f), top - dp(6f), left + dp(250f), top + lines.size * lh + dp(4f))
-        fill.color = Color.BLACK
-        fill.alpha = 150
-        c.drawRoundRect(rect, dp(10f), dp(10f), fill)
-        mono.alpha = 255
-        lines.forEachIndexed { i, l -> c.drawText(l, left, top + (i + 1) * lh - dp(3f), mono) }
+        y += meterH
+        val flashing = d != null && d.clickAgoMs < CLICK_FLASH_MS
+        drawMeter(
+            c, ix, y, innerW, "click",
+            if (have) "%.1f dip %.2f/%.2f".format(d!!.reach, d.curlDepth, d.curlNeeded) else "–",
+            if (have) d!!.curlDepth / (d.curlNeeded * 1.5f) else 0f,
+            floatArrayOf(1f / 1.5f),
+            when {
+                flashing -> COLOR_OK
+                d?.clickState == "CURLING" -> accent
+                else -> 0xFFB8B0A8.toInt()
+            },
+        )
+        y += meterH
+        when {
+            d?.bindLabel != null -> drawMeter(c, ix, y, innerW, "bind", d.bindLabel.take(16), d.bindProgress, null, accent)
+            d?.swipeAxis != null -> drawMeter(
+                c, ix, y, innerW, "swipe",
+                if (d.swipeAxis == SwipeAxis.HORIZONTAL) "armed ⟷" else "armed ↕", 1f, null, COLOR_OK,
+            )
+            else -> drawMeter(
+                c, ix, y, innerW, "flat hand", if (have) "blade ${d!!.blade}" else "–",
+                if (have && d!!.blade != "-") 1f else 0f, null, 0xFFB8B0A8.toInt(),
+            )
+        }
+        y += meterH + dp(3f)
+
+        // Index-reach sparkline: the dashed accent line is how low the reach must dip (below the recent maximum).
+        rect.set(ix, y, ix + innerW, y + sparkH)
+        fill.color = 0xFF211D1A.toInt()
+        fill.alpha = 255
+        c.drawRoundRect(rect, dp(5f), dp(5f), fill)
+        fun sy(v: Float) = y + sparkH - ((v - SPARK_LO) / (SPARK_HI - SPARK_LO)).coerceIn(0f, 1f) * sparkH
+        if (have && d!!.reachBaseline > 0f) {
+            stroke.pathEffect = dash
+            stroke.strokeWidth = dp(1f)
+            stroke.color = Color.WHITE
+            stroke.alpha = 80
+            c.drawLine(ix, sy(d.reachBaseline), ix + innerW, sy(d.reachBaseline), stroke)
+            stroke.color = accent
+            stroke.alpha = 200
+            val needLine = sy(d.reachBaseline - d.curlNeeded)
+            c.drawLine(ix, needLine, ix + innerW, needLine, stroke)
+            stroke.pathEffect = null
+        }
+        val step = innerW / (SPARK_N - 1)
+        stroke.strokeWidth = dp(1f)
+        stroke.color = COLOR_OK
+        stroke.alpha = 200
+        for (i in 0 until SPARK_N) {
+            if (clickMark[(sparkIdx + i) % SPARK_N]) c.drawLine(ix + i * step, y, ix + i * step, y + sparkH, stroke)
+        }
+        path.reset()
+        var pen = false
+        for (i in 0 until SPARK_N) {
+            val v = reachHist[(sparkIdx + i) % SPARK_N]
+            if (v.isNaN()) { pen = false; continue }
+            if (pen) path.lineTo(ix + i * step, sy(v)) else { path.moveTo(ix + i * step, sy(v)); pen = true }
+        }
+        stroke.strokeWidth = dp(1.5f)
+        stroke.color = Color.WHITE
+        stroke.alpha = 235
+        c.drawPath(path, stroke)
+        small.textSize = dp(7.5f)
+        small.color = 0xFF8A8480.toInt()
+        c.drawText("index reach", ix + dp(4f), y + dp(9f), small)
+        small.textSize = dp(9f)
+        if (showLog) drawLog(c, left, top, w, t)
     }
 
-    private fun label(a: SystemAction) = when (a) {
-        SystemAction.BACK -> "←  Back"
-        SystemAction.HOME -> "⌂  Home"
-        SystemAction.RECENTS -> "▢  Recents"
-        SystemAction.NOTIFICATIONS -> "Notifications"
-        SystemAction.QUICK_SETTINGS -> "Quick settings"
-        SystemAction.RECENTER -> "◎  Recenter"
-        SystemAction.NONE -> ""
+    /** Recent events as a block right above the panel (it only exists while there are fresh entries), newest at the bottom. */
+    private fun drawLog(c: Canvas, left: Float, panelTop: Float, w: Float, t: Long) {
+        val live = log.takeLast(LOG_LINES).filter { t - it.t < LOG_FADE_MS }
+        if (live.isEmpty()) return
+        val lh = dp(11.5f)
+        val pad = dp(7f)
+        val h = live.size * lh + 2 * pad - dp(2f)
+        rect.set(left, panelTop - dp(5f) - h, left + w, panelTop - dp(5f))
+        fill.color = 0xFF14110F.toInt()
+        fill.alpha = 240
+        c.drawRoundRect(rect, dp(10f), dp(10f), fill)
+        var ly = rect.top + pad
+        val maxChars = if (previewSize == PreviewSize.SMALL) 20 else 28
+        for (line in live) {
+            small.color = line.color
+            small.alpha = (255 * (1f - (t - line.t) / LOG_FADE_MS.toFloat())).toInt().coerceIn(40, 255)
+            c.drawText(line.text.take(maxChars), left + dp(8f), ly + dp(9f), small)
+            ly += lh
+        }
+        small.alpha = 255
+    }
+
+    /** Label + value over a thin bar; [ticks] are 0..1 positions of thresholds. */
+    private fun drawMeter(c: Canvas, left: Float, top: Float, width: Float, label: String, value: String, frac: Float, ticks: FloatArray?, color: Int) {
+        small.alpha = 255
+        small.color = 0xFFB8B0A8.toInt()
+        c.drawText(label, left, top + dp(9f), small)
+        small.color = Color.WHITE
+        c.drawText(value, left + width - small.measureText(value), top + dp(9f), small)
+        val by = top + dp(13f)
+        val bh = dp(6f)
+        rect2.set(left, by, left + width, by + bh)
+        fill.color = 0xFF3A3531.toInt()
+        fill.alpha = 255
+        c.drawRoundRect(rect2, bh / 2f, bh / 2f, fill)
+        val f = frac.coerceIn(0f, 1f)
+        if (f > 0.005f) {
+            rect2.right = left + width * f
+            fill.color = color
+            c.drawRoundRect(rect2, bh / 2f, bh / 2f, fill)
+        }
+        if (ticks != null) {
+            fill.color = Color.WHITE
+            for (tk in ticks) {
+                val x = left + width * tk.coerceIn(0f, 1f)
+                c.drawRect(x - dp(0.8f), by - dp(2f), x + dp(0.8f), by + bh + dp(2f), fill)
+            }
+        }
     }
 
     private companion object {
         /** The glow drifts slowly; 30 fps is plenty and halves the GPU cost on 60/120 Hz screens. */
         const val GLOW_FRAME_MS = 33L
+        const val COLOR_OK = 0xFF69F0AE.toInt()
+        const val COLOR_WARN = 0xFFFF8A65.toInt()
+        const val COLOR_THUMB = 0xFFFFD54F.toInt()
+        const val CLICK_FLASH_MS = 400L
+        const val LOG_KEEP = 24
+        const val LOG_LINES = 6
+        const val LOG_FADE_MS = 6000L
+        /** Pinch meter spans thumb–index distances 0 .. PINCH_SCALE palm sizes. */
+        const val PINCH_SCALE = 1.2f
+        const val SPARK_N = 60
+        const val SPARK_LO = 0.8f
+        const val SPARK_HI = 2.4f
     }
 
     private fun approach(cur: Float, target: Float, step: Float): Float = when {

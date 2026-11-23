@@ -2,6 +2,7 @@ package app.aircontrol.service
 
 import android.graphics.Bitmap
 import app.aircontrol.gesture.ControlEvent
+import app.aircontrol.gesture.EngineDebug
 import app.aircontrol.gesture.HandObservation
 import app.aircontrol.gesture.PoseObservation
 import kotlinx.coroutines.channels.BufferOverflow
@@ -16,7 +17,7 @@ object ControlBus {
     /** Coarse tracking status (updated a few times per second). */
     val state = MutableStateFlow(TrackingState())
 
-    /** Latest landmarks; only published while someone collects it (overlay skeleton / HUD). */
+    /** Latest landmarks + engine state; only published while someone collects it (overlay preview). */
     val snapshot = MutableStateFlow<TrackingSnapshot?>(null)
 
     /** Latest analysed frame + landmarks; only published while the calibration screen is open. */
@@ -34,10 +35,6 @@ data class TrackingState(
     val delegate: String = "",
     val sign: String = "None",
     val pinch: Float = 0f,
-    /** Push-to-click: recent growth of ln(hand scale). */
-    val push: Float = 0f,
-    /** Flat-hand orientation: V, H or -. */
-    val blade: String = "-",
     val handVisible: Boolean = false,
     val bodyVisible: Boolean = false,
 )
@@ -47,6 +44,8 @@ data class TrackingSnapshot(
     val aspect: Float,
     val hands: List<HandObservation>,
     val pose: PoseObservation?,
+    /** What the engine decided for this very frame. */
+    val debug: EngineDebug,
 )
 
 data class PreviewFrame(val bitmap: Bitmap, val mirrored: Boolean, val snapshot: TrackingSnapshot)

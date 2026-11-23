@@ -45,9 +45,9 @@ class OverlayController(private val service: AccessibilityService) {
         val needsWindow = when (e) {
             is ControlEvent.Pointer -> e.visible
             is ControlEvent.ArmProgress -> e.progress > 0f
-            is ControlEvent.SignProgress -> e.progress > 0f
+            is ControlEvent.BindProgress -> e.progress > 0f
             is ControlEvent.SwipeMode -> e.axis != null || e.progress > 0f
-            is ControlEvent.TouchMove -> false
+            is ControlEvent.TouchMove, is ControlEvent.ClickRejected -> false
             else -> true
         }
         if (needsWindow) attach()
