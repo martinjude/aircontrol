@@ -85,417 +85,589 @@ class GestureEngineTest {
 
     // ------------------------------------------------------------ pinch / touch
 
-    @Test
-    fun quickPinchIsATap() {
-        val h = EngineHarness()
-        h.arm()
-        h.hold(400) { hand(0.66f, 0.5f, Shape.OPEN) }
-        h.hold(150) { hand(0.66f, 0.5f, Shape.PINCH) }
-        h.hold(300) { hand(0.66f, 0.5f, Shape.OPEN) }
-        assertEquals(1, h.of<ControlEvent.Tap>().size)
-        assertTrue(h.of<ControlEvent.TouchDown>().isEmpty())
-        assertTrue(h.of<ControlEvent.Swipe>().isEmpty())
+    // ------------------------------------------------------------ finger tap: thumb meets index
+
+    /** Thumb and index touch for [touchMs], from an open hand (or a pointing hand with [pointing]). */
+    private fun EngineHarness.tap(touchMs: Long = 120, x: Float = 0.66f, y: Float = 0.5f, pointing: Boolean = false, yawDeg: Float = 0f) {
+        val open = if (pointing) Shape.POINT else Shape.OPEN
+        val closed = if (pointing) Shape.POINT_PINCH else Shape.PINCH
+        hold(touchMs) { hand(x, y, closed, yawDeg = yawDeg) }
+        hold(300) { hand(x, y, open, yawDeg = yawDeg) }
     }
 
+    private fun EngineHarness.clicks() = of<ControlEvent.Tap>().filter { it.click }
+
     @Test
-    fun tapLandsWhereThePointerWas() {
+    fun aQuickTouchIsAClickWhereTheCursorWas() {
         val h = EngineHarness()
         h.arm()
-        h.hold(400) { hand(0.66f, 0.5f, Shape.OPEN) }
+        h.hold(500) { hand(0.66f, 0.5f, Shape.OPEN) }
         val before = h.of<ControlEvent.Pointer>().last()
-        h.hold(150) { hand(0.66f, 0.5f, Shape.PINCH) }
-        h.hold(200) { hand(0.66f, 0.5f, Shape.OPEN) }
-        val tap = h.of<ControlEvent.Tap>().single()
-        assertEquals(before.x, tap.x, 0.01f)
-        assertEquals(before.y, tap.y, 0.01f)
+        h.tap()
+        val c = h.clicks().single()
+        assertEquals(before.x, c.x, 0.01f)
+        assertEquals(before.y, c.y, 0.01f)
+        assertTrue(h.of<ControlEvent.TouchDown>().isEmpty())
     }
 
     @Test
-    fun pinchMoveReleaseIsADrag() {
+    fun aPointingHandTapsToo() {
+        val h = EngineHarness()
+        h.arm()
+        h.hold(500) { hand(0.66f, 0.5f, Shape.POINT) }
+        h.tap(pointing = true)
+        assertEquals(1, h.clicks().size)
+    }
+
+    @Test
+    fun separateTapsEachClick() {
+        val h = EngineHarness()
+        h.arm()
+        h.hold(500) { hand(0.66f, 0.5f, Shape.OPEN) }
+        h.tap()
+        h.hold(300) { hand(0.66f, 0.5f, Shape.OPEN) }
+        h.tap()
+        assertEquals(2, h.clicks().size)
+    }
+
+    @Test
+    fun touchMoveReleaseIsADrag() {
         val h = EngineHarness()
         h.arm()
         h.hold(400) { hand(0.60f, 0.5f, Shape.OPEN) }
         h.hold(100) { hand(0.60f, 0.5f, Shape.PINCH) }
-        // 0.2 image heights to the right = 15 % of the screen width (the camera view maps 1:1 onto the screen).
-        h.hold(400) { ms -> hand(0.60f + 0.2f * ms / 400f, 0.5f, Shape.PINCH) }
-        h.hold(200) { hand(0.80f, 0.5f, Shape.OPEN) }
-
-        assertTrue(h.of<ControlEvent.Tap>().isEmpty())
+        h.hold(600) { ms -> hand(0.60f + 0.15f * ms / 600f, 0.5f, Shape.PINCH) }
+        h.hold(200) { hand(0.75f, 0.5f, Shape.OPEN) }
         assertEquals(1, h.of<ControlEvent.TouchDown>().size)
-        assertEquals(1, h.of<ControlEvent.TouchUp>().size)
-        val moves = h.of<ControlEvent.TouchMove>().map { it.x }
-        assertTrue(moves.size >= 5)
-        assertTrue("drag should move right", moves.last() > moves.first() + 0.1f)
-        // Order: down, moves, up.
-        val kinds = h.events.filter { it is ControlEvent.TouchDown || it is ControlEvent.TouchMove || it is ControlEvent.TouchUp }
-        assertTrue(kinds.first() is ControlEvent.TouchDown)
-        assertTrue(kinds.last() is ControlEvent.TouchUp)
+        assertTrue(h.of<ControlEvent.TouchMove>().size > 3)
+        val down = h.of<ControlEvent.TouchDown>().single()
+        val up = h.of<ControlEvent.TouchUp>().single()
+        assertTrue("dragged right", up.x - down.x > 0.05f)
+        assertTrue(h.clicks().isEmpty())
     }
 
     @Test
-    fun pinchHeldStillPressesAndHolds() {
+    fun touchHeldStillPressesAndHolds() {
         val h = EngineHarness()
         h.arm()
         h.hold(400) { hand(0.66f, 0.5f, Shape.OPEN) }
         h.hold(900) { hand(0.66f, 0.5f, Shape.PINCH) }
         assertEquals(1, h.of<ControlEvent.TouchDown>().size)
         assertTrue(h.of<ControlEvent.TouchUp>().isEmpty())
+        assertTrue(h.of<ControlEvent.Pointer>().last().dragging)
         h.hold(200) { hand(0.66f, 0.5f, Shape.OPEN) }
         assertEquals(1, h.of<ControlEvent.TouchUp>().size)
-        assertTrue(h.of<ControlEvent.Tap>().isEmpty())
     }
 
     @Test
-    fun pinchHysteresisIgnoresSmallOpening() {
+    fun hysteresisIgnoresASmallOpeningWhileHolding() {
         val h = EngineHarness()
         h.arm()
         h.hold(400) { hand(0.66f, 0.5f, Shape.OPEN) }
-        h.hold(400) { ms -> hand(0.66f, 0.5f, Shape.PINCH, pinchRatio = if (ms > 200) 0.38f else 0.1f) }
-        // 0.38 is above the enter threshold but below the exit one: still pinched.
-        assertTrue(h.of<ControlEvent.Tap>().isEmpty())
+        h.hold(500) { hand(0.66f, 0.5f, Shape.PINCH) }
+        h.hold(200) { hand(0.66f, 0.5f, Shape.PINCH, pinchRatio = 0.38f) }
         assertTrue(h.of<ControlEvent.TouchUp>().isEmpty())
-        assertEquals(1, h.of<ControlEvent.TouchDown>().size)
     }
 
     @Test
     fun losingTheHandMidDragLiftsTheTouch() {
         val h = EngineHarness()
         h.arm()
-        h.hold(300) { hand(0.66f, 0.5f, Shape.OPEN) }
-        h.hold(500) { hand(0.66f, 0.5f, Shape.PINCH) }
-        h.hold(600) { null }
-        assertEquals(1, h.of<ControlEvent.TouchDown>().size)
+        h.hold(400) { hand(0.66f, 0.5f, Shape.OPEN) }
+        h.hold(600) { hand(0.66f, 0.5f, Shape.PINCH) }
+        h.hold(800) { null }
         assertEquals(1, h.of<ControlEvent.TouchUp>().size)
     }
 
     @Test
-    fun fistIsNotAPinch() {
+    fun aFistIsNotATap() {
+        val h = EngineHarness(configWith())
+        h.arm()
+        h.hold(400) { hand(0.66f, 0.5f, Shape.OPEN) }
+        h.hold(150) { hand(0.66f, 0.5f, Shape.FIST, gesture = Signs.CLOSED_FIST) }
+        h.hold(800) { hand(0.66f, 0.5f, Shape.OPEN) }
+        assertTrue(h.of<ControlEvent.Tap>().isEmpty())
+    }
+
+    @Test
+    fun fingersDriftingTogetherSlowlyAreNotAClick() {
+        val h = EngineHarness(EngineConfig(screenW = 1000, screenH = 2000, density = 2f, clickStrictness = ClickStrictness.STRICT))
+        h.arm()
+        h.hold(400) { hand(0.66f, 0.5f, Shape.PINCH, pinchRatio = 0.5f) }
+        h.hold(800) { ms -> hand(0.66f, 0.5f, Shape.PINCH, pinchRatio = 0.5f - 0.35f * ms / 800f) }
+        h.hold(300) { hand(0.66f, 0.5f, Shape.OPEN) }
+        assertTrue(h.clicks().isEmpty())
+        assertTrue(h.of<ControlEvent.ClickRejected>().any { it.reason.contains("approach") })
+    }
+
+    @Test
+    fun aTapWhileTheHandSweepsIsRejectedWhenStrict() {
+        val h = EngineHarness(EngineConfig(screenW = 1000, screenH = 2000, density = 2f, clickStrictness = ClickStrictness.STRICT))
+        h.arm()
+        h.hold(400) { hand(0.4f, 0.5f, Shape.OPEN) }
+        h.hold(200) { ms -> hand(0.4f + 0.1f * ms / 200f, 0.5f, Shape.OPEN) }
+        h.hold(120) { ms -> hand(0.5f + 0.06f * ms / 120f, 0.5f, Shape.PINCH) }
+        h.hold(300) { hand(0.56f, 0.5f, Shape.OPEN) }
+        assertTrue(h.clicks().isEmpty())
+    }
+
+    @Test
+    fun aCleanTapHasHighConfidence() {
         val h = EngineHarness()
         h.arm()
-        h.hold(600) { hand(0.66f, 0.5f, Shape.FIST) }
+        h.hold(500) { hand(0.66f, 0.5f, Shape.OPEN) }
+        h.tap()
+        assertEquals(1, h.clicks().size)
+        assertTrue("confidence ${h.engine.debug.clickConfidence}", h.engine.debug.clickConfidence > 0.8f)
+    }
+
+    @Test
+    fun tapsCanBeTurnedOff() {
+        val h = EngineHarness(EngineConfig(screenW = 1000, screenH = 2000, density = 2f, clickMethod = ClickMethod.PUSH))
+        h.arm()
+        h.hold(500) { hand(0.66f, 0.5f, Shape.OPEN) }
+        h.tap()
         assertTrue(h.of<ControlEvent.Tap>().isEmpty())
         assertTrue(h.of<ControlEvent.TouchDown>().isEmpty())
     }
 
-    // ------------------------------------------------------------ armed swipes
-
-    /** Holds a still blade to arm swipe mode; returns the harness with events cleared. */
-    private fun armedSwipes(shape: Shape): EngineHarness {
+    @Test
+    fun aTapIsSeenButNotPerformedWhileDisarmed() {
         val h = EngineHarness()
-        h.arm()
-        h.hold(450) { hand(0.66f, 0.5f, shape) }
-        assertTrue("swipe mode should arm", h.of<ControlEvent.SwipeMode>().any { it.axis != null })
-        h.events.clear()
-        return h
+        h.hold(600) { hand(0.66f, 0.5f, Shape.OPEN) }
+        h.tap()
+        assertFalse(h.engine.armed)
+        assertTrue(h.of<ControlEvent.Tap>().isEmpty())
+        assertTrue("the preview still sees the click", h.engine.debug.clickAgoMs < 1000)
     }
 
-    private fun EngineHarness.stroke(shape: Shape, fromX: Float, fromY: Float, dx: Float, dy: Float, ms: Long = 160) {
+    // ------------------------------------------------------------ pause after a pose
+
+    @Test
+    fun goingBackFromAPoseDoesNotClick() {
+        val h = EngineHarness()
+        h.arm()
+        h.hold(500) { hand(0.66f, 0.5f, Shape.OPEN) }
+        // A fist (bound to Home) shown briefly, then straight into a touch while the hand reopens.
+        h.hold(400) { hand(0.66f, 0.5f, Shape.FIST, gesture = Signs.CLOSED_FIST) }
+        h.hold(150) { hand(0.66f, 0.5f, Shape.OPEN) }
+        h.tap()
+        assertTrue(h.clicks().isEmpty())
+        assertTrue(h.of<ControlEvent.ClickRejected>().any { it.reason.contains("right after a pose") })
+        assertTrue(h.of<ControlEvent.Pointer>().any { it.cooldown })
+        // Once the pause has passed, taps work again.
+        h.hold(600) { hand(0.66f, 0.5f, Shape.OPEN) }
+        h.tap()
+        assertEquals(1, h.clicks().size)
+    }
+
+    @Test
+    fun aBindFiringPausesTapsAndSwipes() {
+        val h = EngineHarness()
+        h.arm()
+        h.hold(1000) { hand(0.66f, 0.5f, Shape.FIST, gesture = Signs.THUMB_DOWN) }
+        assertEquals(listOf(SystemAction.BACK), h.fired())
+        h.hold(100) { hand(0.66f, 0.5f, Shape.OPEN) }
+        h.tap()
+        assertTrue(h.clicks().isEmpty())
+    }
+
+    @Test
+    fun anUnboundPoseDoesNotPause() {
+        val h = EngineHarness()
+        h.arm()
+        h.hold(500) { hand(0.66f, 0.5f, Shape.OPEN) }
+        // Thumb up has no default bind.
+        h.hold(300) { hand(0.66f, 0.5f, Shape.FIST, gesture = Signs.THUMB_UP) }
+        h.hold(150) { hand(0.66f, 0.5f, Shape.OPEN) }
+        h.tap()
+        assertEquals(1, h.clicks().size)
+    }
+
+    // ------------------------------------------------------------ hand angle and pointer confidence
+
+    @Test
+    fun aPalmTurnedFarAwayCannotClickAndWarns() {
+        val h = EngineHarness()
+        h.arm()
+        h.hold(500) { hand(0.66f, 0.5f, Shape.OPEN, yawDeg = 65f) }
+        h.tap(yawDeg = 65f)
+        assertTrue(h.clicks().isEmpty())
+        assertTrue(h.of<ControlEvent.ClickRejected>().any { it.reason.startsWith("tap: palm not facing the camera") })
+        val p = h.of<ControlEvent.Pointer>().last()
+        assertTrue("warning ${p.angleWarn}", p.angleWarn > 0.8f)
+        assertTrue("confidence ${p.confidence}", p.confidence < 0.3f)
+    }
+
+    @Test
+    fun aSlightlyTurnedPalmIsFine() {
+        val h = EngineHarness()
+        h.arm()
+        h.hold(500) { hand(0.66f, 0.5f, Shape.OPEN, yawDeg = 15f) }
+        h.tap(yawDeg = 15f)
+        assertEquals(1, h.clicks().size)
+        val p = h.of<ControlEvent.Pointer>().last()
+        assertEquals(0f, p.angleWarn, 0.05f)
+        assertTrue(p.confidence > 0.9f)
+    }
+
+    @Test
+    fun theHandCalibrationSetsTheGoodAngle() {
+        val h = EngineHarness()
+        h.hold(300) { hand(0.66f, 0.5f, Shape.OPEN, yawDeg = 35f) }
+        h.engine.startCalibration(CalibrationKind.HAND)
+        h.hold(2300) { hand(0.66f, 0.5f, Shape.OPEN, yawDeg = 35f) }
+        val r = h.of<ControlEvent.Calibration>().last { it.done }.result!!
+        val ref = P3(r[0], r[1], r[2])
+        val turned = HandFeatures.from(hand(0.66f, 0.5f, Shape.OPEN, yawDeg = 35f), SyntheticHands.ASPECT)
+        val facing = HandFeatures.from(hand(0.66f, 0.5f, Shape.OPEN), SyntheticHands.ASPECT)
+        assertEquals(0f, turned.angleTo(ref), 2f)
+        assertEquals(35f, facing.angleTo(ref), 3f)
+        // With that reference, the turned hand clicks and the facing one is still within tolerance.
+        val cfg = EngineConfig(screenW = 1000, screenH = 2000, density = 2f, handReference = ref)
+        val h2 = EngineHarness(cfg)
+        h2.arm()
+        h2.hold(500) { hand(0.66f, 0.5f, Shape.OPEN, yawDeg = 35f) }
+        h2.tap(yawDeg = 35f)
+        assertEquals(1, h2.clicks().size)
+        assertTrue(h2.of<ControlEvent.Pointer>().last().confidence > 0.9f)
+    }
+
+    @Test
+    fun theAngleIgnoresWhichHandItIs() {
+        val right = HandFeatures.from(hand(0.66f, 0.5f, Shape.OPEN, yawDeg = 30f), SyntheticHands.ASPECT)
+        val mirrored = HandFeatures.from(hand(0.66f, 0.5f, Shape.OPEN, yawDeg = -30f), SyntheticHands.ASPECT)
+        assertEquals(right.angleTo(null), mirrored.angleTo(null), 0.5f)
+        assertEquals(30f, right.angleTo(null), 2f)
+    }
+
+    // ------------------------------------------------------------ attention
+
+    private val lookingCal = AttentionCalibration(0f, 0f, 10f)
+
+    @Test
+    fun withTheAttentionGateATapNeedsTheUserLooking() {
+        val cfg = EngineConfig(screenW = 1000, screenH = 2000, density = 2f, attentionGate = true, attentionCalibration = lookingCal)
+        val away = EngineHarness(cfg)
+        away.face = FaceObservation(40f, 0f, 0f, 0f)
+        away.arm()
+        away.hold(500) { hand(0.66f, 0.5f, Shape.OPEN) }
+        away.tap()
+        assertTrue(away.clicks().isEmpty())
+        assertTrue(away.of<ControlEvent.ClickRejected>().any { it.reason.contains("not looking at the screen") })
+
+        val looking = EngineHarness(cfg)
+        looking.face = FaceObservation(2f, -1f, 1f, 0f)
+        looking.arm()
+        looking.hold(500) { hand(0.66f, 0.5f, Shape.OPEN) }
+        looking.tap()
+        assertEquals(1, looking.clicks().size)
+    }
+
+    @Test
+    fun withoutAFaceTheGateNeitherBlocksNorConfirms() {
+        val cfg = EngineConfig(screenW = 1000, screenH = 2000, density = 2f, attentionGate = true, attentionCalibration = lookingCal)
+        val h = EngineHarness(cfg)
+        h.arm()
+        h.hold(500) { hand(0.66f, 0.5f, Shape.OPEN) }
+        h.tap()
+        assertEquals(1, h.clicks().size)
+        assertEquals(null, h.of<ControlEvent.Pointer>().last().looking)
+    }
+
+    @Test
+    fun thePointerShowsWhenTheEyesAreOnTheScreen() {
+        val cfg = EngineConfig(screenW = 1000, screenH = 2000, density = 2f, attentionCalibration = lookingCal)
+        val h = EngineHarness(cfg)
+        h.face = FaceObservation(1f, 0f, 0f, 0f)
+        h.arm()
+        h.hold(400) { hand(0.66f, 0.5f, Shape.OPEN) }
+        assertEquals(true, h.of<ControlEvent.Pointer>().last().looking)
+        val looking = h.of<ControlEvent.Pointer>().last().confidence
+        h.face = FaceObservation(45f, 10f, 0f, 0f)
+        h.hold(600) { hand(0.66f, 0.5f, Shape.OPEN) }
+        val away = h.of<ControlEvent.Pointer>().last()
+        assertEquals(false, away.looking)
+        assertTrue("gaze lowers confidence", away.confidence < looking - 0.2f)
+    }
+
+    @Test
+    fun attentionCalibrationMeasuresTheGaze() {
+        val h = EngineHarness()
+        h.face = FaceObservation(5f, -3f, 1f, 0f)
+        h.hold(200) { hand(0.66f, 0.5f, Shape.POINT) }
+        h.engine.startCalibration(CalibrationKind.ATTENTION)
+        h.hold(3300) { hand(0.66f, 0.5f, Shape.POINT) }
+        val done = h.of<ControlEvent.Calibration>().last()
+        assertTrue(done.done)
+        val r = done.result!!
+        assertEquals(6f, r[0], 0.1f)
+        assertEquals(-3f, r[1], 0.1f)
+    }
+
+    // ------------------------------------------------------------ air push
+
+    /** Hand grows from palm size [s0] to [s1] in [inMs], holds, and shrinks back. */
+    private fun EngineHarness.push(
+        s0: Float = 0.1f, s1: Float = 0.118f, inMs: Long = 250, holdMs: Long = 100, outMs: Long = 250,
+        x: (Long) -> Float = { 0.66f }, shape: Shape = Shape.POINT,
+    ) {
+        val base = t
+        hold(inMs) { ms -> hand(x(t - base), 0.5f, shape, s = s0 + (s1 - s0) * (ms.toFloat() / inMs).coerceAtMost(1f)) }
+        hold(holdMs) { hand(x(t - base), 0.5f, shape, s = s1) }
+        hold(outMs) { ms -> hand(x(t - base), 0.5f, shape, s = s1 + (s0 - s1) * (ms.toFloat() / outMs).coerceAtMost(1f)) }
+        hold(400) { hand(x(t - base), 0.5f, shape, s = s0) }
+    }
+
+    @Test
+    fun pushingThroughTheFloatingPlaneTaps() {
+        val h = EngineHarness()
+        h.arm()
+        h.hold(1500) { hand(0.66f, 0.5f, Shape.POINT) }
+        val before = h.of<ControlEvent.Pointer>().last()
+        h.push()
+        val taps = h.of<ControlEvent.Tap>()
+        assertEquals(1, taps.size)
+        assertFalse(taps[0].click)
+        assertEquals(before.x, taps[0].x, 0.02f)
+        assertTrue("proximity reported", h.of<ControlEvent.Pointer>().any { it.push > 0.5f })
+    }
+
+    @Test
+    fun aShallowPushOnlyGlows() {
+        val h = EngineHarness()
+        h.arm()
+        h.hold(1500) { hand(0.66f, 0.5f, Shape.POINT) }
+        h.push(s1 = 0.108f)
+        assertTrue(h.of<ControlEvent.Tap>().isEmpty())
+        assertTrue(h.of<ControlEvent.Pointer>().any { it.push > 0.3f })
+    }
+
+    @Test
+    fun slowlyComingCloserDoesNotPressTheFloatingPlane() {
+        val h = EngineHarness()
+        h.arm()
+        h.hold(1500) { hand(0.66f, 0.5f, Shape.POINT) }
+        h.hold(4000) { ms -> hand(0.66f, 0.5f, Shape.POINT, s = 0.1f + 0.02f * ms / 4000f) }
+        h.hold(1000) { hand(0.66f, 0.5f, Shape.POINT, s = 0.12f) }
+        assertTrue(h.of<ControlEvent.Tap>().isEmpty())
+        assertTrue(h.of<ControlEvent.TouchDown>().isEmpty())
+    }
+
+    @Test
+    fun aCalibratedPlaneIsFixedToTheCamera() {
+        // Hover at palm size 0.1, touch at 0.112 everywhere.
+        val cal = PushCalibration(PushCalibration.TARGETS.map { (u, v) -> PushPoint(u, v, depthAt(0.1f), depthAt(0.112f)) })
+        val cfg = EngineConfig(screenW = 1000, screenH = 2000, density = 2f, pushCalibration = cal)
+        val h = EngineHarness(cfg)
+        h.arm()
+        // Coming slowly closer reaches the plane all the same: it does not move with the hand.
+        h.hold(800) { hand(0.66f, 0.5f, Shape.POINT) }
+        h.hold(3000) { ms -> hand(0.66f, 0.5f, Shape.POINT, s = 0.1f + 0.016f * ms / 3000f) }
+        assertEquals(1, h.of<ControlEvent.TouchDown>().size + h.of<ControlEvent.Tap>().size)
+        // Staying farther back than the hover never presses.
+        val h2 = EngineHarness(cfg)
+        h2.arm()
+        h2.hold(800) { hand(0.66f, 0.5f, Shape.POINT, s = 0.09f) }
+        h2.push(s0 = 0.09f, s1 = 0.1f)
+        assertTrue(h2.of<ControlEvent.Tap>().isEmpty())
+    }
+
+    @Test
+    fun pushHoldAndMoveDragsSlowly() {
+        val h = EngineHarness()
+        h.arm()
+        h.hold(1500) { hand(0.66f, 0.5f, Shape.POINT) }
+        h.push(holdMs = 900, x = { ms -> if (ms < 300) 0.66f else 0.66f + 0.15f * ((ms - 300) / 600f).coerceAtMost(1f) })
+        assertEquals(1, h.of<ControlEvent.TouchDown>().size)
+        val down = h.of<ControlEvent.TouchDown>().single()
+        val up = h.of<ControlEvent.TouchUp>().single()
+        val moved = up.x - down.x
+        // The palm moved 0.15 / 1.2 ≈ 12.5 % of the screen; at the default drag speed (0.35×) the touch moves far less.
+        assertTrue("dragged right a little: $moved", moved > 0.01f && moved < 0.07f)
+        assertTrue(h.of<ControlEvent.Tap>().isEmpty())
+    }
+
+    @Test
+    fun airPushCanBeTurnedOff() {
+        val h = EngineHarness(EngineConfig(screenW = 1000, screenH = 2000, density = 2f, clickMethod = ClickMethod.TAP))
+        h.arm()
+        h.hold(1500) { hand(0.66f, 0.5f, Shape.POINT) }
+        h.push()
+        assertTrue(h.of<ControlEvent.Tap>().isEmpty())
+    }
+
+    @Test
+    fun aPushRightAfterAPoseIsIgnored() {
+        val h = EngineHarness()
+        h.arm()
+        h.hold(1500) { hand(0.66f, 0.5f, Shape.POINT) }
+        h.hold(300) { hand(0.66f, 0.5f, Shape.FIST, gesture = Signs.CLOSED_FIST) }
+        h.push()
+        assertTrue(h.of<ControlEvent.Tap>().isEmpty())
+    }
+
+    /** The air-push depth signal (ln of the rigid palm-bone scale) of a hand with palm size [s]. */
+    private fun depthAt(s: Float) = kotlin.math.ln(HandFeatures.from(hand(0.66f, 0.5f, Shape.POINT, s = s), SyntheticHands.ASPECT).scale)
+
+    /** Palm-centre position whose cursor lands on screen point ([u], [v]). */
+    private fun palmFor(u: Float, v: Float): Pair<Float, Float> {
+        val r = safeRegion()
+        return (r.left + u * r.width) to (r.top + v * r.height)
+    }
+
+    @Test
+    fun thePushCalibrationMeasuresFivePoints() {
+        val h = EngineHarness()
+        h.hold(300) { hand(0.66f, 0.5f, Shape.POINT) }
+        h.engine.startCalibration(CalibrationKind.PUSH)
+        for ((u, v) in PushCalibration.TARGETS) {
+            val (x, y) = palmFor(u, v)
+            h.hold(1400) { hand(x, y, Shape.POINT) }
+            h.hold(250) { ms -> hand(x, y, Shape.POINT, s = 0.1f + 0.015f * (ms / 250f).coerceAtMost(1f)) }
+            h.hold(1300) { hand(x, y, Shape.POINT, s = 0.115f) }
+            h.hold(300) { hand(x, y, Shape.POINT) }
+        }
+        val done = h.of<ControlEvent.Calibration>().last { it.done }
+        val cal = PushCalibration.fromResult(done.result!!)
+        assertEquals(5, cal.points.size)
+        val (hover, plane) = cal.at(0.5f, 0.5f)
+        assertEquals(depthAt(0.1f), hover, 0.01f)
+        assertEquals(kotlin.math.ln(1.15f) * 0.85f, plane - hover, 0.02f)
+        assertTrue(h.of<ControlEvent.Calibration>().any { it.targetX == 0.85f && it.targetY == 0.85f })
+    }
+
+    @Test
+    fun thePushCalibrationWaitsForTheHandOnTheDot() {
+        val h = EngineHarness()
+        h.hold(300) { hand(0.66f, 0.5f, Shape.POINT) }
+        h.engine.startCalibration(CalibrationKind.PUSH)
+        // The centre dot, but the hand stays in a corner: no progress.
+        val (x, y) = palmFor(0.1f, 0.9f)
+        h.hold(3000) { hand(x, y, Shape.POINT) }
+        assertTrue(h.of<ControlEvent.Calibration>().none { it.done })
+        assertTrue(h.of<ControlEvent.Calibration>().last().progress < 0.05f)
+    }
+
+    // ------------------------------------------------------------ swipes: open-palm flick
+
+    /** Open palm held still, then moved by ([dx], [dy]) in [ms], then held still. */
+    private fun EngineHarness.flick(fromX: Float, fromY: Float, dx: Float, dy: Float, ms: Long = 130, shape: Shape = Shape.OPEN, stillMs: Long = 300) {
+        hold(stillMs) { hand(fromX, fromY, shape) }
         hold(ms) { t -> val k = (t.toFloat() / ms).coerceAtMost(1f); hand(fromX + dx * k, fromY + dy * k, shape) }
         hold(250) { hand(fromX + dx, fromY + dy, shape) }
     }
 
+    private fun EngineHarness.swipes() = of<ControlEvent.Swipe>().map { it.dir }
+
     @Test
-    fun verticalBladeHeldArmsHorizontalSwipes() {
-        val h = armedSwipes(Shape.BLADE_V)
-        h.stroke(Shape.BLADE_V, 0.66f, 0.5f, 0.25f, 0f)
-        assertEquals(listOf(SwipeDir.RIGHT), h.of<ControlEvent.Swipe>().map { it.dir })
-        val h2 = armedSwipes(Shape.BLADE_V)
-        h2.stroke(Shape.BLADE_V, 0.66f, 0.5f, -0.25f, 0f)
-        assertEquals(listOf(SwipeDir.LEFT), h2.of<ControlEvent.Swipe>().map { it.dir })
+    fun stillOpenPalmThenFlickSwipesInEachDirection() {
+        for ((d, dir) in listOf(
+            (0.3f to 0f) to SwipeDir.RIGHT, (-0.3f to 0f) to SwipeDir.LEFT,
+            (0f to -0.3f) to SwipeDir.UP, (0f to 0.3f) to SwipeDir.DOWN,
+        )) {
+            val h = EngineHarness()
+            h.arm()
+            h.flick(0.66f, 0.5f, d.first, d.second)
+            assertEquals("flick $dir", listOf(dir), h.swipes())
+        }
     }
 
     @Test
-    fun horizontalBladeArmsVerticalSwipes() {
-        val h = armedSwipes(Shape.BLADE_H)
-        assertTrue(h.engine.armed)
-        h.stroke(Shape.BLADE_H, 0.66f, 0.5f, 0f, -0.25f)
-        assertEquals(listOf(SwipeDir.UP), h.of<ControlEvent.Swipe>().map { it.dir })
-        val h2 = armedSwipes(Shape.BLADE_H)
-        h2.stroke(Shape.BLADE_H, 0.66f, 0.5f, 0f, 0.25f)
-        assertEquals(listOf(SwipeDir.DOWN), h2.of<ControlEvent.Swipe>().map { it.dir })
-    }
-
-    @Test
-    fun swipeModeArmsWithTheRightAxisAndHidesThePointer() {
+    fun aFlickDoesNotClickOrTouch() {
         val h = EngineHarness()
         h.arm()
-        h.hold(450) { hand(0.66f, 0.5f, Shape.BLADE_V) }
-        val modes = h.of<ControlEvent.SwipeMode>()
-        assertTrue("hold progress shown first", modes.first().axis == null && modes.first().progress > 0f)
-        assertEquals(SwipeAxis.HORIZONTAL, modes.last().axis)
-        assertFalse(h.of<ControlEvent.Pointer>().last().visible)
+        h.flick(0.66f, 0.5f, 0.3f, 0f)
+        assertTrue(h.of<ControlEvent.Tap>().isEmpty())
+        assertTrue(h.of<ControlEvent.TouchDown>().isEmpty())
     }
 
     @Test
-    fun strokeWithoutArmingDoesNothing() {
+    fun theCursorStaysPutDuringAFlick() {
         val h = EngineHarness()
         h.arm()
         h.hold(400) { hand(0.66f, 0.5f, Shape.OPEN) }
-        h.stroke(Shape.OPEN, 0.66f, 0.5f, 0.25f, 0f)
-        // A fast blade that was never held still doesn't arm either.
-        h.stroke(Shape.BLADE_V, 0.66f, 0.5f, -0.25f, 0f)
-        assertTrue(h.of<ControlEvent.Swipe>().isEmpty())
-    }
-
-    @Test
-    fun movingBladeDoesNotArm() {
-        val h = EngineHarness()
-        h.arm()
-        h.hold(1200) { ms -> hand(0.5f + 0.3f * ms / 1200f, 0.5f, Shape.BLADE_V) }
-        assertTrue(h.of<ControlEvent.SwipeMode>().none { it.axis != null })
-    }
-
-    @Test
-    fun offAxisStrokeIgnoredInSwipeMode() {
-        val h = armedSwipes(Shape.BLADE_V)
-        h.stroke(Shape.BLADE_V, 0.66f, 0.5f, 0f, 0.25f)
-        assertTrue(h.of<ControlEvent.Swipe>().isEmpty())
-    }
-
-    @Test
-    fun repeatedStrokesWhileFlat_returnIgnored() {
-        val h = armedSwipes(Shape.BLADE_V)
-        h.stroke(Shape.BLADE_V, 0.66f, 0.5f, 0.25f, 0f)
-        // Quick return stroke: blocked.
-        h.stroke(Shape.BLADE_V, 0.91f, 0.5f, -0.25f, 0f, ms = 160)
-        h.hold(600) { hand(0.66f, 0.5f, Shape.BLADE_V) }
-        // Second stroke in the same direction, still armed.
-        h.stroke(Shape.BLADE_V, 0.66f, 0.5f, 0.25f, 0f)
-        assertEquals(listOf(SwipeDir.RIGHT, SwipeDir.RIGHT), h.of<ControlEvent.Swipe>().map { it.dir })
-    }
-
-    @Test
-    fun swipeModeExitsWhenHandNoLongerFlat() {
-        val h = armedSwipes(Shape.BLADE_V)
-        h.hold(600) { hand(0.66f, 0.5f, Shape.POINT) }
-        assertEquals(null, h.of<ControlEvent.SwipeMode>().last().axis)
-        assertTrue(h.of<ControlEvent.Pointer>().last().visible)
-        h.stroke(Shape.POINT, 0.66f, 0.5f, 0.25f, 0f)
-        assertTrue(h.of<ControlEvent.Swipe>().isEmpty())
-    }
-
-    // ------------------------------------------------------------ pinch orientation
-
-    @Test
-    fun pinchIsIgnoredWhenTheHandIsHorizontal() {
-        val h = EngineHarness()
-        h.arm()
-        h.hold(400) { hand(0.66f, 0.5f, Shape.OPEN, rollDeg = 90f) }
-        h.hold(700) { hand(0.66f, 0.5f, Shape.PINCH, rollDeg = 90f) }
-        h.hold(300) { hand(0.66f, 0.5f, Shape.OPEN, rollDeg = 90f) }
-        assertTrue(h.of<ControlEvent.TouchDown>().isEmpty())
-        assertTrue(h.of<ControlEvent.Tap>().isEmpty())
-    }
-
-    @Test
-    fun pinchWorksWithAMildTilt() {
-        val h = EngineHarness()
-        h.arm()
-        h.hold(400) { hand(0.66f, 0.5f, Shape.OPEN, rollDeg = 30f) }
-        h.hold(150) { hand(0.66f, 0.5f, Shape.PINCH, rollDeg = 30f) }
-        h.hold(300) { hand(0.66f, 0.5f, Shape.OPEN, rollDeg = 30f) }
-        assertEquals(1, h.of<ControlEvent.Tap>().count { !it.click })
-    }
-
-    @Test
-    fun pinchBeyondTheToleranceIsIgnored() {
-        val h = EngineHarness()
-        h.arm()
-        h.hold(400) { hand(0.66f, 0.5f, Shape.OPEN, rollDeg = 60f) }
-        h.hold(150) { hand(0.66f, 0.5f, Shape.PINCH, rollDeg = 60f) }
-        h.hold(300) { hand(0.66f, 0.5f, Shape.OPEN, rollDeg = 60f) }
-        assertTrue(h.of<ControlEvent.Tap>().isEmpty())
-    }
-
-    @Test
-    fun aDragSurvivesTheHandTiltingFurther() {
-        val h = EngineHarness()
-        h.arm()
-        h.hold(400) { hand(0.60f, 0.5f, Shape.OPEN) }
-        h.hold(100) { hand(0.60f, 0.5f, Shape.PINCH) }
-        // Started upright; the wrist then rolls to 60°, past the start tolerance but inside the hold tolerance.
-        h.hold(600) { ms -> hand(0.60f + 0.1f * ms / 600f, 0.5f, Shape.PINCH, rollDeg = 60f * ms / 600f) }
-        assertEquals(1, h.of<ControlEvent.TouchDown>().size)
-        assertTrue("drag must not drop while tilting", h.of<ControlEvent.TouchUp>().isEmpty())
-        h.hold(200) { hand(0.70f, 0.5f, Shape.OPEN, rollDeg = 60f) }
-        assertEquals(1, h.of<ControlEvent.TouchUp>().size)
-    }
-
-    // ------------------------------------------------------------ click: index curl and release
-
-    /** Index curls to [depth] and straightens again; the palm stays at ([x], [y]) (plus optional drift). */
-    private fun EngineHarness.curl(
-        x: Float = 0.66f, y: Float = 0.5f, depth: Float = 0.55f,
-        downMs: Long = 100, holdMs: Long = 40, upMs: Long = 100, driftX: Float = 0f, rollDeg: Float = 0f,
-    ) {
-        hold(downMs) { t ->
-            val k = (t.toFloat() / downMs).coerceAtMost(1f)
-            hand(x + driftX * k, y, Shape.POINT, indexCurl = depth * k, rollDeg = rollDeg)
-        }
-        hold(holdMs) { hand(x + driftX, y, Shape.POINT, indexCurl = depth, rollDeg = rollDeg) }
-        hold(upMs) { t ->
-            val k = (t.toFloat() / upMs).coerceAtMost(1f)
-            hand(x + driftX, y, Shape.POINT, indexCurl = depth * (1f - k), rollDeg = rollDeg)
-        }
-    }
-
-    private fun EngineHarness.clicks() = of<ControlEvent.Tap>().filter { it.click }
-
-    @Test
-    fun curlAndReleaseIsAClickWhereTheCursorWas() {
-        val h = EngineHarness()
-        h.arm()
-        h.hold(500) { hand(0.66f, 0.5f, Shape.POINT) }
         val before = h.of<ControlEvent.Pointer>().last()
-        h.curl()
-        h.hold(300) { hand(0.66f, 0.5f, Shape.POINT) }
-        val click = h.clicks().single()
-        assertEquals(before.x, click.x, 0.01f)
-        assertEquals(before.y, click.y, 0.01f)
-        assertTrue(h.of<ControlEvent.TouchDown>().isEmpty())
-    }
-
-    @Test
-    fun theClickFiresOnTheReleaseNotOnTheCurl() {
-        val h = EngineHarness()
-        h.arm()
-        h.hold(500) { hand(0.66f, 0.5f, Shape.POINT) }
-        h.hold(120) { t -> hand(0.66f, 0.5f, Shape.POINT, indexCurl = 0.55f * (t / 120f).coerceAtMost(1f)) }
-        h.hold(100) { hand(0.66f, 0.5f, Shape.POINT, indexCurl = 0.55f) }
-        assertTrue("no click while the finger is still curled", h.clicks().isEmpty())
-        h.hold(150) { t -> hand(0.66f, 0.5f, Shape.POINT, indexCurl = 0.55f * (1f - (t / 150f).coerceAtMost(1f))) }
-        assertEquals(1, h.clicks().size)
-    }
-
-    @Test
-    fun theCursorDoesNotMoveWhenTheIndexCurls() {
-        val h = EngineHarness()
-        h.arm()
-        h.hold(500) { hand(0.66f, 0.5f, Shape.POINT) }
         h.events.clear()
-        h.curl()
-        h.hold(300) { hand(0.66f, 0.5f, Shape.POINT) }
-        val ptr = h.of<ControlEvent.Pointer>()
-        assertTrue(ptr.isNotEmpty())
-        assertTrue(ptr.all { kotlin.math.abs(it.x - ptr.first().x) < 0.005f && kotlin.math.abs(it.y - ptr.first().y) < 0.005f })
-        assertTrue("curl progress is reported", ptr.any { it.press > 0f })
+        h.hold(130) { t -> hand(0.66f + 0.3f * (t / 130f).coerceAtMost(1f), 0.5f, Shape.OPEN) }
+        h.hold(150) { hand(0.96f, 0.5f, Shape.OPEN) }
+        assertEquals(listOf(SwipeDir.RIGHT), h.swipes())
+        val after = h.of<ControlEvent.Pointer>().last()
+        assertEquals(before.x, after.x, 0.03f)
     }
 
     @Test
-    fun slowCurlLikeMakingAFistIsNotAClick() {
+    fun pointingHandMovingFastIsNotASwipe() {
         val h = EngineHarness()
         h.arm()
-        h.hold(500) { hand(0.66f, 0.5f, Shape.POINT) }
-        h.curl(downMs = 700, holdMs = 300, upMs = 700)
-        h.hold(400) { hand(0.66f, 0.5f, Shape.POINT) }
-        assertTrue(h.clicks().isEmpty())
-        assertTrue(h.of<ControlEvent.ClickRejected>().any { it.reason.startsWith("too slow") })
+        h.flick(0.66f, 0.5f, 0.3f, 0f, shape = Shape.POINT)
+        assertTrue(h.swipes().isEmpty())
     }
 
     @Test
-    fun pointingThenClosingAFistAndStayingIsNotAClick() {
+    fun slowOpenPalmMoveIsNotASwipe() {
         val h = EngineHarness()
         h.arm()
-        h.hold(500) { hand(0.66f, 0.5f, Shape.POINT) }
-        h.hold(800) { hand(0.66f, 0.5f, Shape.FIST) }
-        assertTrue(h.clicks().isEmpty())
+        h.flick(0.66f, 0.5f, 0.3f, 0f, ms = 900)
+        assertTrue(h.swipes().isEmpty())
     }
 
     @Test
-    fun shallowCurlIsNotAClickAndSaysWhy() {
+    fun openPalmAlwaysMovingIsNotASwipe() {
         val h = EngineHarness()
         h.arm()
-        h.hold(500) { hand(0.66f, 0.5f, Shape.POINT) }
-        h.curl(depth = 0.25f)
-        h.hold(300) { hand(0.66f, 0.5f, Shape.POINT) }
-        assertTrue(h.clicks().isEmpty())
-        assertTrue(h.of<ControlEvent.ClickRejected>().any { it.reason.startsWith("too shallow") })
+        // Never still: a steady sweep, then faster.
+        h.hold(1200) { ms -> hand(0.3f + 0.4f * ms / 1200f, 0.5f, Shape.OPEN) }
+        h.hold(130) { ms -> hand(0.7f + 0.3f * ms / 130f, 0.5f, Shape.OPEN) }
+        assertTrue(h.swipes().isEmpty())
     }
 
     @Test
-    fun higherClickSensitivityAcceptsAShallowerCurl() {
-        val cfg = EngineConfig(screenW = 1000, screenH = 2000, density = 2f, clickSensitivity = 2f)
-        val h = EngineHarness(cfg)
-        h.arm()
-        h.hold(500) { hand(0.66f, 0.5f, Shape.POINT) }
-        h.curl(depth = 0.25f)
-        h.hold(300) { hand(0.66f, 0.5f, Shape.POINT) }
-        assertEquals(1, h.clicks().size)
-    }
-
-    @Test
-    fun curlWhileSweepingTheHandIsNotAClick() {
+    fun smallFlickIsNotASwipe() {
         val h = EngineHarness()
         h.arm()
-        h.hold(500) { hand(0.66f, 0.5f, Shape.POINT) }
-        h.curl(driftX = 0.2f)
-        h.hold(300) { hand(0.86f, 0.5f, Shape.POINT) }
-        assertTrue(h.clicks().isEmpty())
+        h.flick(0.66f, 0.5f, 0.12f, 0f)
+        assertTrue(h.swipes().isEmpty())
     }
 
     @Test
-    fun clickWorksOnAHorizontalHandToo() {
+    fun diagonalFlickIsIgnored() {
         val h = EngineHarness()
         h.arm()
-        h.hold(500) { hand(0.66f, 0.5f, Shape.POINT, rollDeg = 90f) }
-        h.curl(rollDeg = 90f)
-        h.hold(300) { hand(0.66f, 0.5f, Shape.POINT, rollDeg = 90f) }
-        assertEquals(1, h.clicks().size)
+        h.flick(0.66f, 0.5f, 0.25f, 0.22f)
+        assertTrue(h.swipes().isEmpty())
     }
 
     @Test
-    fun aSingleCurlClicksExactlyOnce() {
+    fun theReturnStrokeIsIgnoredButTheNextFlickWorks() {
         val h = EngineHarness()
         h.arm()
-        h.hold(500) { hand(0.66f, 0.5f, Shape.POINT) }
-        h.curl()
-        h.hold(1000) { hand(0.66f, 0.5f, Shape.POINT) }
-        assertEquals(1, h.clicks().size)
+        h.flick(0.5f, 0.5f, 0.3f, 0f)
+        // Quick return.
+        h.flick(0.8f, 0.5f, -0.3f, 0f, stillMs = 150)
+        h.hold(700) { hand(0.5f, 0.5f, Shape.OPEN) }
+        h.flick(0.5f, 0.5f, 0.3f, 0f)
+        assertEquals(listOf(SwipeDir.RIGHT, SwipeDir.RIGHT), h.swipes())
     }
 
     @Test
-    fun separateCurlsEachClick() {
+    fun aFlickLeavingTheFrameStillCounts() {
         val h = EngineHarness()
         h.arm()
-        h.hold(500) { hand(0.66f, 0.5f, Shape.POINT) }
-        h.curl()
-        h.hold(600) { hand(0.66f, 0.5f, Shape.POINT) }
-        h.curl()
-        h.hold(300) { hand(0.66f, 0.5f, Shape.POINT) }
-        assertEquals(2, h.clicks().size)
+        val a = SyntheticHands.ASPECT
+        h.hold(300) { hand(a - 0.35f, 0.5f, Shape.OPEN) }
+        // Fast toward the right edge, then the hand is gone (motion blur / out of view).
+        h.hold(66) { ms -> hand(a - 0.35f + 0.22f * ms / 66f, 0.5f, Shape.OPEN) }
+        h.hold(500) { null }
+        assertEquals(listOf(SwipeDir.RIGHT), h.swipes())
     }
 
     @Test
-    fun clickIsNotFiredByAPinch() {
-        val h = EngineHarness()
+    fun swipesCanBeTurnedOff() {
+        val h = EngineHarness(EngineConfig(screenW = 1000, screenH = 2000, density = 2f, swipesEnabled = false))
         h.arm()
-        h.hold(400) { hand(0.66f, 0.5f, Shape.POINT) }
-        h.hold(150) { hand(0.66f, 0.5f, Shape.PINCH) }
-        h.hold(300) { hand(0.66f, 0.5f, Shape.POINT) }
-        assertTrue(h.clicks().isEmpty())
-        assertEquals(1, h.of<ControlEvent.Tap>().count { !it.click })
-    }
-
-    @Test
-    fun handMovingAroundWithoutCurlingDoesNotClick() {
-        val h = EngineHarness()
-        h.arm()
-        h.hold(2000) { ms ->
-            val a = ms / 300f
-            hand(0.66f + 0.05f * kotlin.math.sin(a), 0.5f + 0.05f * kotlin.math.cos(a), Shape.POINT)
-        }
-        assertTrue(h.of<ControlEvent.Tap>().isEmpty())
-    }
-
-    @Test
-    fun clicksAreDetectedButNotPerformedWhileDisarmed() {
-        val h = EngineHarness()
-        h.hold(500) { hand(0.66f, 0.5f, Shape.POINT) }
-        h.curl()
-        h.hold(300) { hand(0.66f, 0.5f, Shape.POINT) }
-        assertFalse(h.engine.armed)
-        assertTrue("no taps while disarmed", h.of<ControlEvent.Tap>().isEmpty())
-        assertTrue("the preview still sees the click", h.engine.debug.clickAgoMs < 1000)
+        h.flick(0.66f, 0.5f, 0.3f, 0f)
+        assertTrue(h.swipes().isEmpty())
     }
 
     // ------------------------------------------------------------ binds
@@ -672,29 +844,58 @@ class GestureEngineTest {
 
     // ------------------------------------------------------------ pointer mapping
 
+    private fun safeRegion(s: Float = 0.1f, gain: Float = 1f) =
+        PointerMap.region(s, SyntheticHands.ASPECT, 1.7f, 0.7f, 0.65f, gain)
+
     @Test
-    fun cameraCentreIsScreenCentreAndCornersAreScreenCorners() {
+    fun theHandSafeRegionMapsOntoTheWholeScreen() {
+        val r = safeRegion()
         val a = SyntheticHands.ASPECT
-        fun map(x: Float, y: Float, g: Float = 1f) = PointerMap.map(P3(x * a, y), a, g)
-        assertEquals(0.5f to 0.5f, map(0.5f, 0.5f))
-        assertEquals(0f to 0f, map(0f, 0f))
-        assertEquals(1f to 1f, map(1f, 1f))
-        assertEquals(1f to 0f, map(1f, 0f))
-        // Gain 2 around the centre: a quarter of the view reaches the edge, beyond it clamps.
-        assertEquals(1f, map(0.75f, 0.5f, 2f).first, 1e-5f)
-        assertEquals(0.75f, map(0.625f, 0.5f, 2f).first, 1e-5f)
-        assertEquals(1f, map(0.9f, 0.5f, 2f).first, 1e-5f)
+        assertEquals(0.065f, r.left, 1e-5f)
+        assertEquals(0.17f, r.top, 1e-5f)
+        assertEquals(a - 0.065f, r.right, 1e-5f)
+        assertEquals(0.93f, r.bottom, 1e-5f)
+        val tl = PointerMap.map(P3(r.left, r.top), r)
+        assertEquals(0f, tl.u, 1e-5f); assertEquals(0f, tl.v, 1e-5f)
+        val br = PointerMap.map(P3(r.right, r.bottom), r)
+        assertEquals(1f, br.u, 1e-5f); assertEquals(1f, br.v, 1e-5f)
+        val beyond = PointerMap.map(P3(0f, 0f), r)
+        assertEquals(PointerMap.EDGE_LEFT or PointerMap.EDGE_TOP, beyond.edge)
     }
 
     @Test
-    fun pointerSitsOnThePalmCentre() {
+    fun theRegionAdaptsToTheHandSizeButNeverCollapses() {
+        val near = safeRegion(s = 0.4f)
+        assertTrue(near.height >= 0.35f - 1e-5f)
+        assertTrue(near.width >= SyntheticHands.ASPECT * 0.35f - 1e-5f)
+        val far = safeRegion(s = 0.05f)
+        assertTrue(far.width > safeRegion().width)
+    }
+
+    @Test
+    fun theTopCornerIsReachedWithTheFingersStillInView() {
         val h = EngineHarness()
         h.arm()
-        h.hold(600) { hand(0.5f * SyntheticHands.ASPECT, 0.5f, Shape.POINT) }
+        // Palm centre right at the hand-safe corner: the index tip (1.05 palm sizes above it) is still in the frame.
+        h.hold(900) { hand(0.065f, 0.17f, Shape.POINT) }
+        val p = h.of<ControlEvent.Pointer>().last()
+        assertEquals(0f, p.x, 0.01f)
+        assertEquals(0f, p.y, 0.01f)
+        assertTrue("index tip in view", hand(0.065f, 0.17f, Shape.POINT).landmarks[HandLm.INDEX_TIP].y > 0f)
+    }
+
+    @Test
+    fun pointerFollowsThePalmThroughTheRegion() {
+        val h = EngineHarness()
+        h.arm()
+        val r = safeRegion()
+        val cx = (r.left + r.right) / 2f
+        val cy = (r.top + r.bottom) / 2f
+        h.hold(600) { hand(cx, cy, Shape.POINT) }
         val a = h.of<ControlEvent.Pointer>().last()
         assertEquals(0.5f, a.x, 0.01f)
         assertEquals(0.5f, a.y, 0.01f)
-        h.hold(900) { hand(0.75f * SyntheticHands.ASPECT, 0.25f, Shape.POINT) }
+        h.hold(900) { hand(r.left + 0.75f * r.width, r.top + 0.25f * r.height, Shape.POINT) }
         val b = h.of<ControlEvent.Pointer>().last()
         assertEquals(0.75f, b.x, 0.02f)
         assertEquals(0.25f, b.y, 0.02f)
@@ -722,7 +923,10 @@ class GestureEngineTest {
         val cfg = EngineConfig(screenW = 1000, screenH = 2000, density = 2f, pointerGain = 2f)
         val h = EngineHarness(cfg)
         h.arm()
-        h.hold(900) { hand(0.5f * SyntheticHands.ASPECT, 0.55f, Shape.POINT) }
+        val r = safeRegion()
+        val cx = (r.left + r.right) / 2f
+        val cy = (r.top + r.bottom) / 2f
+        h.hold(900) { hand(cx, cy + 0.05f * r.height, Shape.POINT) }
         val p = h.of<ControlEvent.Pointer>().last()
         assertEquals(0.5f, p.x, 0.01f)
         assertEquals(0.6f, p.y, 0.01f)
@@ -732,15 +936,15 @@ class GestureEngineTest {
     fun debugSnapshotDescribesTheFrame() {
         val h = EngineHarness()
         h.arm()
-        h.hold(500) { hand(0.66f, 0.5f, Shape.POINT, side = HandSide.RIGHT) }
+        h.hold(500) { hand(0.66f, 0.5f, Shape.OPEN, side = HandSide.RIGHT) }
         val d = h.engine.debug
         assertTrue(d.armed)
         assertEquals(1, d.hands)
         assertEquals(HandSide.RIGHT, d.side)
-        assertTrue(d.upright)
-        assertEquals(0f, d.tiltDeg, 1f)
-        assertTrue(d.reach > 1.5f)
-        assertEquals(0.30f, d.curlNeeded, 1e-4f)
+        assertEquals(0f, d.angleDeg, 2f)
+        assertTrue(d.gap > 0.6f)
+        assertTrue(d.pointerConfidence > 0.9f)
+        assertFalse(d.cooldown)
         assertEquals("IDLE", d.touch)
     }
 

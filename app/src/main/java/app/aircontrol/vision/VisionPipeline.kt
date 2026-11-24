@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.os.SystemClock
 import android.util.Log
+import app.aircontrol.gesture.FaceObservation
 import app.aircontrol.gesture.FrameObservation
 import app.aircontrol.gesture.HandObservation
 import app.aircontrol.gesture.HandSide
@@ -18,6 +19,8 @@ import com.google.mediapipe.tasks.components.containers.NormalizedLandmark
 import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.core.Delegate
 import com.google.mediapipe.tasks.vision.core.RunningMode
+import com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarker
+import com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarkerResult
 import com.google.mediapipe.tasks.vision.gesturerecognizer.GestureRecognizer
 import com.google.mediapipe.tasks.vision.gesturerecognizer.GestureRecognizerResult
 import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarker
@@ -25,8 +28,9 @@ import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarkerResult
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * MediaPipe hand + gesture recognition (every frame) and upper-body pose (every Nth frame), in
- * LIVE_STREAM mode. Results are converted to user-view [FrameObservation]s (mirrored if needed).
+ * MediaPipe hand + gesture recognition (every frame), upper-body pose and face (each every Nth frame,
+ * on different frames), in LIVE_STREAM mode. Results are converted to user-view
+ * [FrameObservation]s (mirrored if needed).
  */
 class VisionPipeline(
     private val context: Context,
@@ -43,12 +47,16 @@ class VisionPipeline(
     @Volatile var poseEvery = 3
     /** Flips the detected left/right hand (safety switch in case the label comes out inverted). */
     @Volatile var swapHands = false
+    /** Face (attention gate): runs while armed when enabled, or always while [faceAlways] (calibration). */
+    @Volatile var faceEnabled = false
+    @Volatile var faceAlways = false
 
     var delegateName = ""
         private set
 
     @Volatile private var recognizer: GestureRecognizer? = null
     @Volatile private var pose: PoseLandmarker? = null
+    @Volatile private var face: FaceLandmarker? = null
 
     val ready: Boolean get() = recognizer != null
     private var lastTs = 0L
@@ -58,11 +66,14 @@ class VisionPipeline(
 
     @Volatile private var latestPose: PoseObservation? = null
     @Volatile private var latestPoseTs = 0L
+    @Volatile private var latestFace: FaceObservation? = null
+    @Volatile private var latestFaceTs = 0L
 
     // Flow control: one frame in flight per model, so latency can never build up when inference is
     // slower than the camera. 0 = idle; a stuck flag expires after IN_FLIGHT_TIMEOUT_MS.
     @Volatile private var handsInFlightSince = 0L
     @Volatile private var poseInFlightSince = 0L
+    @Volatile private var faceInFlightSince = 0L
 
     /** True while the previous frame is still being analysed: the caller should drop this one. */
     fun busy(nowMs: Long): Boolean {
@@ -99,6 +110,8 @@ class VisionPipeline(
             Log.w(TAG, "PoseLandmarker GPU failed, trying CPU", t)
             try { createPose(Delegate.CPU) } catch (t2: Throwable) { Log.w(TAG, "PoseLandmarker unavailable", t2); null }
         }
+        // Face is optional too (attention gate); the CPU keeps the GPU for the hands.
+        face = try { createFace(Delegate.CPU) } catch (t: Throwable) { Log.w(TAG, "FaceLandmarker unavailable", t); null }
     }
 
     /** Submits a frame; called from the frame source thread. */
@@ -118,15 +131,28 @@ class VisionPipeline(
             Log.w(TAG, "recognizeAsync failed", e)
             return
         }
+        val every = poseEvery.coerceAtLeast(2)
+        val slot = frameCounter++ % every
         val p = pose
         val poseIdle = poseInFlightSince.let { it == 0L || now - it > IN_FLIGHT_TIMEOUT_MS }
-        if (p != null && poseEnabled && armed && poseIdle && frameCounter++ % poseEvery.coerceAtLeast(1) == 0) {
+        if (p != null && poseEnabled && armed && poseIdle && slot == 0) {
             poseInFlightSince = now
             try {
                 p.detectAsync(BitmapImageBuilder(bitmap).build(), ts)
             } catch (e: Exception) {
                 poseInFlightSince = 0L
                 Log.w(TAG, "pose detectAsync failed", e)
+            }
+        }
+        val fl = face
+        val faceIdle = faceInFlightSince.let { it == 0L || now - it > IN_FLIGHT_TIMEOUT_MS }
+        if (fl != null && ((faceEnabled && armed) || faceAlways) && faceIdle && slot == 1) {
+            faceInFlightSince = now
+            try {
+                fl.detectAsync(BitmapImageBuilder(bitmap).build(), ts)
+            } catch (e: Exception) {
+                faceInFlightSince = 0L
+                Log.w(TAG, "face detectAsync failed", e)
             }
         }
         // Drop bookkeeping for frames MediaPipe skipped.
@@ -140,8 +166,10 @@ class VisionPipeline(
     fun close() {
         try { recognizer?.close() } catch (_: Exception) {}
         try { pose?.close() } catch (_: Exception) {}
+        try { face?.close() } catch (_: Exception) {}
         recognizer = null
         pose = null
+        face = null
     }
 
     private fun createRecognizer(delegate: Delegate): GestureRecognizer {
@@ -170,6 +198,31 @@ class VisionPipeline(
             .setErrorListener { e -> poseInFlightSince = 0L; Log.w(TAG, "pose error", e) }
             .build()
         return PoseLandmarker.createFromOptions(context, options)
+    }
+
+    private fun createFace(delegate: Delegate): FaceLandmarker {
+        val options = FaceLandmarker.FaceLandmarkerOptions.builder()
+            .setBaseOptions(BaseOptions.builder().setModelAssetPath(FACE_MODEL).setDelegate(delegate).build())
+            .setRunningMode(RunningMode.LIVE_STREAM)
+            .setNumFaces(1)
+            .setOutputFaceBlendshapes(true)
+            .setOutputFacialTransformationMatrixes(true)
+            .setResultListener { result, _ -> faceInFlightSince = 0L; onFace(result) }
+            .setErrorListener { e -> faceInFlightSince = 0L; Log.w(TAG, "face error", e) }
+            .build()
+        return FaceLandmarker.createFromOptions(context, options)
+    }
+
+    private fun onFace(result: FaceLandmarkerResult) {
+        val matrix = result.facialTransformationMatrixes().orElse(null)?.firstOrNull()
+        val blend = result.faceBlendshapes().orElse(null)?.firstOrNull()
+        latestFace = if (matrix != null && matrix.size >= 16) {
+            val scores = blend?.associate { it.categoryName() to it.score() }.orEmpty()
+            FaceObservation.from(matrix, scores, mirror)
+        } else {
+            null
+        }
+        latestFaceTs = result.timestampMs()
     }
 
     private fun onPose(result: PoseLandmarkerResult) {
@@ -214,7 +267,8 @@ class VisionPipeline(
             )
         }
         val poseObs = latestPose?.takeIf { poseEnabled && ts - latestPoseTs < 500 }
-        val obs = FrameObservation(ts, aspect, hands, poseObs)
+        val faceObs = latestFace?.takeIf { (faceEnabled || faceAlways) && ts - latestFaceTs < 500 }
+        val obs = FrameObservation(ts, aspect, hands, poseObs, faceObs)
         val frame = try { BitmapExtractor.extract(image) } catch (e: Exception) { null } ?: return
         listener.onObservation(obs, frame, inference)
     }
@@ -227,5 +281,6 @@ class VisionPipeline(
         private const val IN_FLIGHT_TIMEOUT_MS = 1000L
         const val HAND_MODEL = "gesture_recognizer.task"
         const val POSE_MODEL = "pose_landmarker_lite.task"
+        const val FACE_MODEL = "face_landmarker.task"
     }
 }

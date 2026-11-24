@@ -20,6 +20,8 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -38,6 +40,8 @@ import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -84,8 +88,12 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private enum class Tab(val icon: String, val label: String) {
-    HOME("🤟", "Control"), CAMERA("📷", "Camera"), BINDS("🖐", "Binds"), SETTINGS("⚙️", "Settings"), HELP("❔", "Help")
+private enum class Tab(val icon: androidx.compose.ui.graphics.vector.ImageVector, val label: String) {
+    HOME(AirIcons.Power, "Control"),
+    CAMERA(AirIcons.Camera, "Camera"),
+    BINDS(AirIcons.Zap, "Binds"),
+    SETTINGS(AirIcons.Sliders, "Settings"),
+    HELP(AirIcons.Help, "Help"),
 }
 
 @Composable
@@ -98,14 +106,19 @@ private fun AirApp() {
     Scaffold(
         containerColor = AirColors.Bg,
         bottomBar = {
-            NavigationBar(containerColor = AirColors.Surface) {
-                Tab.entries.forEach { t ->
-                    NavigationBarItem(
-                        selected = tab == t,
-                        onClick = { tab = t },
-                        icon = { Text(t.icon, fontSize = 20.sp) },
-                        label = { Text(t.label) },
-                    )
+            Column {
+                HorizontalDivider(color = AirColors.Hairline)
+                NavigationBar(containerColor = AirColors.Bg, tonalElevation = 0.dp) {
+                    Tab.entries.forEach { t ->
+                        val selected = tab == t
+                        NavigationBarItem(
+                            selected = selected,
+                            onClick = { tab = t },
+                            icon = { AirIcon(t.icon, if (selected) AirColors.Text else AirColors.Muted, 22.dp) },
+                            label = { Text(t.label, style = AirType.Caption, color = if (selected) AirColors.Text else AirColors.Muted) },
+                            colors = NavigationBarItemDefaults.colors(indicatorColor = AirColors.SurfaceHigh),
+                        )
+                    }
                 }
             }
         },
@@ -115,8 +128,8 @@ private fun AirApp() {
                 .fillMaxSize()
                 .padding(padding)
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
+                .padding(horizontal = 16.dp, vertical = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             when (tab) {
                 Tab.HOME -> HomeScreen(settings)
@@ -192,41 +205,48 @@ private fun HomeScreen(settings: AppSettings) {
         if (needsCamera && !setup.camera) cameraLauncher.launch(Manifest.permission.CAMERA) else TrackingService.start(context)
     }
 
-    Text("AirControl", fontSize = 30.sp, fontWeight = FontWeight.Bold)
-    Muted("Hands-free control of this device with your camera. Hold 🤟 for 1 second to take control.")
+    PageTitle("AirControl", "Control this device from across the room with your hands.")
 
     SectionCard {
         val (color, title) = when {
             !state.running -> AirColors.Muted to "Not running"
-            state.armed -> AirColors.Coral to "Gesture control ON"
-            else -> AirColors.Ok to "Watching for 🤟"
+            state.armed -> AirColors.Coral to "Gesture control on"
+            else -> AirColors.Ok to "Watching for the arm sign"
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
-            StatusDot(color, 14)
-            Spacer(Modifier.width(10.dp))
-            Text(title, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+            StatusDot(color, 10)
+            Spacer(Modifier.width(12.dp))
+            Text(title, style = AirType.Status, color = AirColors.Text)
         }
         if (state.running) {
             Muted("${state.sourceLabel} · ${state.sourceStatus}")
-            Muted("%.0f fps · %d ms inference · %s".format(state.fps, state.inferenceMs, state.delegate.ifEmpty { "…" }))
+            Text(
+                "%.0f fps · %d ms · %s".format(state.fps, state.inferenceMs, state.delegate.ifEmpty { "…" }),
+                style = AirType.Figure, color = AirColors.Text2,
+            )
         } else {
             Muted("Starts the camera in the background. A notification stays visible while AirControl is watching.")
         }
-        if (!setup.accessibility) {
-            Text("⚠️ Enable the accessibility service below, otherwise gestures can't act on the screen.", color = AirColors.Warn, fontSize = 14.sp)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Emoji("🤟", 28.dp)
+            Spacer(Modifier.width(12.dp))
+            Muted("Hold the arm sign (thumb, index and little finger out) for 1 s to take control. Hold it again to stop.", Modifier.weight(1f))
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        if (!setup.accessibility) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                AirIcon(AirIcons.Alert, AirColors.Warn, 18.dp)
+                Spacer(Modifier.width(8.dp))
+                Text("Turn on the accessibility service below, or gestures can't act on the screen", style = AirType.Secondary, color = AirColors.Warn)
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             if (!state.running) {
-                Button(onClick = ::start, modifier = Modifier.height(52.dp)) { Text("Start", fontSize = 17.sp) }
+                Button(onClick = ::start, modifier = Modifier.height(48.dp)) { Text("Start") }
             } else {
-                Button(
-                    onClick = { TrackingService.stop(context) },
-                    modifier = Modifier.height(52.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = AirColors.SurfaceHigh, contentColor = AirColors.Text),
-                ) { Text("Stop", fontSize = 17.sp) }
-                FilledTonalButton(onClick = { TrackingService.toggleArm(context) }, modifier = Modifier.height(52.dp)) {
-                    Text(if (state.armed) "Disarm" else "Arm now")
+                Button(onClick = { TrackingService.toggleArm(context) }, modifier = Modifier.height(48.dp)) {
+                    Text(if (state.armed) "Turn off control" else "Take control")
                 }
+                OutlinedButton(onClick = { TrackingService.stop(context) }, modifier = Modifier.height(48.dp)) { Text("Stop", color = AirColors.Text) }
             }
         }
     }
@@ -243,11 +263,11 @@ private fun HomeScreen(settings: AppSettings) {
                 notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
             }
         }
-        SetupRow("Accessibility service", "Lets AirControl tap, swipe and draw the glow", setup.accessibility, "Open") {
+        SetupRow("Accessibility service", "Lets AirControl tap, swipe and draw on the screen", setup.accessibility, "Open") {
             openAccessibilitySettings(context)
         }
         if (!setup.accessibility) {
-            Muted("If the switch is greyed out (\"Restricted setting\"): open App info → ⋮ menu → Allow restricted settings, then come back and enable it.")
+            Muted("Switch greyed out (\"Restricted setting\")? Open App info, then ⋮ → Allow restricted settings, and come back.")
             TextButton(onClick = { openAppInfo(context) }) { Text("Open App info") }
         }
         SetupRow("Battery: unrestricted", "Stops Android from killing tracking in the background", setup.battery, "Allow") {
@@ -268,14 +288,19 @@ private fun HomeScreen(settings: AppSettings) {
 
 @Composable
 private fun SetupRow(title: String, subtitle: String, ok: Boolean, action: String, onFix: () -> Unit) {
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        StatusDot(if (ok) AirColors.Ok else AirColors.Warn)
-        Spacer(Modifier.width(12.dp))
-        Column(Modifier.weight(1f)) {
-            Text(title, fontSize = 16.sp)
+    Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.width(24.dp), contentAlignment = Alignment.Center) {
+            if (ok) AirIcon(AirIcons.Check, AirColors.Ok, 18.dp) else StatusDot(AirColors.Warn)
+        }
+        Spacer(Modifier.width(8.dp))
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(title, style = AirType.Body, color = AirColors.Text)
             Muted(subtitle)
         }
-        if (!ok) OutlinedButton(onClick = onFix) { Text(action) } else Text("✓", color = AirColors.Ok, fontSize = 18.sp)
+        if (!ok) {
+            Spacer(Modifier.width(8.dp))
+            OutlinedButton(onClick = onFix) { Text(action, color = AirColors.Text) }
+        }
     }
 }
 
@@ -288,7 +313,7 @@ private fun TestCard(enabled: Boolean, running: Boolean, armed: Boolean, launch:
 
     fun delayed(name: String, action: suspend () -> Unit) = launch {
         for (i in 3 downTo 1) {
-            countdown = "$name in $i…"
+            countdown = "$name in $i s"
             delay(1000)
         }
         countdown = null
@@ -296,9 +321,9 @@ private fun TestCard(enabled: Boolean, running: Boolean, armed: Boolean, launch:
     }
 
     SectionCard("Test without the camera") {
-        Muted("Checks that injection works on this device. Delayed actions give you 3 s to switch to another app.")
-        if (!enabled) Text("Enable the accessibility service first.", color = AirColors.Warn, fontSize = 14.sp)
-        countdown?.let { Text(it, color = AirColors.Coral, fontWeight = FontWeight.SemiBold) }
+        Muted("Checks that taps and swipes work on this device. Delayed actions give you 3 s to switch to another app.")
+        if (!enabled) Text("Turn on the accessibility service first", style = AirType.Secondary, color = AirColors.Warn)
+        countdown?.let { Text(it, style = AirType.BodyStrong, color = AirColors.Coral) }
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             FilledTonalButton(enabled = enabled, onClick = {
                 if (running) {
@@ -313,10 +338,10 @@ private fun TestCard(enabled: Boolean, running: Boolean, armed: Boolean, launch:
             }) { Text("Tap center") }
         }
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            listOf(SwipeDir.UP to "↑", SwipeDir.DOWN to "↓", SwipeDir.LEFT to "←", SwipeDir.RIGHT to "→").forEach { (d, l) ->
+            listOf(SwipeDir.UP to "up", SwipeDir.DOWN to "down", SwipeDir.LEFT to "left", SwipeDir.RIGHT to "right").forEach { (d, l) ->
                 OutlinedButton(enabled = enabled, onClick = {
                     delayed("Swipe $l") { ControlBus.events.tryEmit(ControlEvent.Swipe(d)) }
-                }) { Text("Swipe $l") }
+                }) { Text("Swipe $l", color = AirColors.Text) }
             }
         }
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -333,11 +358,11 @@ private fun TestCard(enabled: Boolean, running: Boolean, armed: Boolean, launch:
                     e.tryEmit(ControlEvent.TouchUp(0.5f, 0.3f))
                     e.tryEmit(ControlEvent.Pointer(0.5f, 0.3f, visible = true, touching = false))
                 }
-            }) { Text("Drag ↑") }
+            }) { Text("Drag up", color = AirColors.Text) }
             listOf(SystemAction.BACK to "Back", SystemAction.HOME to "Home", SystemAction.RECENTS to "Recents").forEach { (a, l) ->
                 OutlinedButton(enabled = enabled, onClick = {
                     delayed(l) { ControlBus.events.tryEmit(ControlEvent.BindFired(a, null, a.label)) }
-                }) { Text(l) }
+                }) { Text(l, color = AirColors.Text) }
             }
         }
     }

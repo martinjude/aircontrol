@@ -1,25 +1,30 @@
 package app.aircontrol.gesture
 
-import kotlin.math.abs
 import kotlin.math.exp
 import kotlin.math.hypot
 import kotlin.math.ln
+import kotlin.math.sqrt
 
 /**
- * Turns per-frame hand/body observations into control events.
+ * Turns per-frame hand/body/face observations into control events.
  *
  * Not thread-safe: call every method from a single thread.
  *
  * - Disarmed: only the arm sign (🤟) is watched. Holding it for [EngineConfig.armHoldMs] arms.
  *   (The hand is still analysed so the live preview can show what *would* happen.)
- * - Armed: a pointer follows the centre of the palm; the camera view maps directly onto the screen.
- *   - Click = the index finger curls and straightens quickly ([ClickDetector]).
- *   - Pinch (hand upright, thumb–index plane facing the camera) = finger on the screen: quick pinch
- *     = tap, pinch + move = drag, pinch held = long press.
- *   - Holding a flat hand edge-on for [EngineConfig.swipeArmHoldMs] arms swipe mode: a vertical
- *     blade swipes left/right, a horizontal one up/down. It stays armed while the hand stays flat.
+ * - Armed: a pointer follows the centre of the palm through the hand-safe region ([PointerMap]).
+ *   - Finger tap: thumb and index tips touch. Quick = click; held = finger on the screen (move to
+ *     drag, keep still for a long press).
+ *   - Air push: pushing the hand through a virtual plane ([PushPlane]) touches the same way.
+ *   - Both are judged by [TapGate] (hand angle, steadiness, isolation, approach, attention) and
+ *     paused for [EngineConfig.poseCooldownMs] after a bound pose or the arm sign.
+ *   - Swipe = hold an open palm still for a moment, then flick it ([FlickDetector]).
  *   - Held poses trigger the user's binds (one hand, or two hands together).
  *   - Holding 🤟 again, or no hand for [EngineConfig.autoDisarmMs], disarms.
+ * - The pointer carries a confidence (hand angle, steadiness, gaze, frame edge) and a warning when
+ *   the palm is turned away from the calibrated angle.
+ * - Calibrations ([startCalibration]): the comfortable hand angle, the air plane at 5 screen points,
+ *   and where the eyes look when on the screen.
  */
 class GestureEngine(config: EngineConfig, private val emit: (ControlEvent) -> Unit) {
 
@@ -35,6 +40,9 @@ class GestureEngine(config: EngineConfig, private val emit: (ControlEvent) -> Un
         private set
     @Volatile var bodyVisible = false
         private set
+    /** The calibration in progress, if any. */
+    @Volatile var calibrating: CalibrationKind? = null
+        private set
 
     private class Sample(val t: Long, val x: Float, val y: Float)
 
@@ -46,38 +54,54 @@ class GestureEngine(config: EngineConfig, private val emit: (ControlEvent) -> Un
     private val palmHistory = ArrayDeque<Sample>()
     private val pointerHistory = ArrayDeque<Sample>()
     private val armHold = HoldTracker()
-    private val bladeHold = HoldTracker()
-    private val click = ClickDetector()
+    private val gate = TapGate()
+    private val push = PushPlane()
+    private val flick = FlickDetector()
+    private val attention = Attention()
     private val matcher = BindMatcher()
 
+    // Filtered pointer from the palm, and the output ("aim") after the air-push slow-down.
     private var px = 0f
     private var py = 0f
+    private var prevPx = 0f
+    private var prevPy = 0f
+    private var ox = 0f
+    private var oy = 0f
+    private var palmSpeed = 0f
+    private var palmSizeSmooth = 0f
+    private var lastTrackT = 0L
+    private var region = PointerMap.Region(0f, 0f, 1f, 1f)
+    private var regionAspect = 1f
+    private var edge = 0
+
+    // Confidence.
+    private var angleDeg = 0f
+    private var angleWarn = 0f
+    private var jitter = 0f
+    private var pointerConfidence = 1f
+    private var lastPoseT = NEVER
 
     private var armProgressShown = 0f
     private var bindShown: String? = null
     private var bindProgressNow = 0f
 
     private var touch = Touch.IDLE
+    private var touchSource: TouchSource? = null
     private var downT = 0L
     private var downX = 0f
     private var downY = 0f
-    private var lastTouchEnd = NEVER
-    private var lastSwipeT = NEVER
-    private var lastSwipeDir: SwipeDir? = null
     private var lastClickT = NEVER
-    private var lastPinchReady = false
+    /** A contact (or push) was rejected: ignore it until the fingers part (or the push releases). */
+    private var tapRejected = false
+    private var pushRejected = false
 
-    // Pointer frozen while a bind / blade hold builds up (the hand changes shape).
+    // Pointer frozen while a bind hold builds up (the hand changes shape) or during a flick.
     private var holdFreezeStart = NEVER
     private var freezeX = 0f
     private var freezeY = 0f
-
-    // Swipe mode.
-    private var swipeAxis: SwipeAxis? = null
-    private var bladeLastSeen = NEVER
-    private var bladeHoldStart = NEVER
-    private var bladeStartPalm: P3? = null
-    private var swipeProgressShown = 0f
+    private var flickFreezeUntil = NEVER
+    private var flickX = 0f
+    private var flickY = 0f
 
     private var lastT = 0L
     private var lastHandMs = 0L
@@ -87,6 +111,19 @@ class GestureEngine(config: EngineConfig, private val emit: (ControlEvent) -> Un
     private var activeSeenMs = NEVER
     private var cursorU = 0.5f
     private var cursorV = 0.5f
+
+    // Calibration.
+    private var calStep = 0
+    private var calPhase = 0
+    private var calStartT = 0L
+    private var calStepMs = 0L
+    private var calPrevT = 0L
+    private var calLastEmit = 0L
+    private var calHover = 0f
+    private val calValues = ArrayList<Float>()
+    private val calNormals = ArrayList<P3>()
+    private val calFaces = ArrayList<FaceObservation>()
+    private val calResult = ArrayList<Float>()
 
     init {
         applySmoothing()
@@ -98,6 +135,7 @@ class GestureEngine(config: EngineConfig, private val emit: (ControlEvent) -> Un
         lastT = t
         body.updateBody(f.pose, f.imageAspect, t)
         bodyVisible = body.bodyVisible
+        attention.update(t, f.face, cfg.attentionCalibration)
         val bodyOk = !cfg.requireBody || body.bodyVisible
 
         val armSeen = bodyOk && f.hands.any { it.gesture == cfg.armSign && it.gestureScore >= cfg.signScoreMin }
@@ -109,6 +147,8 @@ class GestureEngine(config: EngineConfig, private val emit: (ControlEvent) -> Un
         } else {
             emptyList()
         }
+        // Pose cooldown: a bound pose, a fist or the arm sign on any hand means the hand is changing shape.
+        if (armSeen || all.any { it.pose != null && (it.pose == Pose.FIST || boundPose(it.pose, cfg)) }) lastPoseT = t
         val hand = selectHand(all, t)
 
         if (!armed) {
@@ -117,6 +157,7 @@ class GestureEngine(config: EngineConfig, private val emit: (ControlEvent) -> Un
         } else {
             processArmed(t, hand, all, armSeen, f.imageAspect)
         }
+        updateCalibration(t, hand, f.face)
         publishDebug(t, hand, all.size, f.imageAspect)
     }
 
@@ -126,6 +167,34 @@ class GestureEngine(config: EngineConfig, private val emit: (ControlEvent) -> Un
     }
 
     fun disarmNow(reason: DisarmReason = DisarmReason.MANUAL) = disarm(reason)
+
+    /** Starts a calibration: the hand angle (needs a hand), the air plane (hand, 5 points) or attention (needs a face). */
+    fun startCalibration(kind: CalibrationKind) {
+        calibrating = kind
+        calStep = 0
+        calPhase = 0
+        calStartT = lastT
+        calStepMs = 0L
+        calPrevT = lastT
+        calLastEmit = NEVER
+        calValues.clear()
+        calNormals.clear()
+        calFaces.clear()
+        calResult.clear()
+        endTouch()
+        emitCalibration(0f)
+    }
+
+    fun cancelCalibration() {
+        val kind = calibrating ?: return
+        calibrating = null
+        emit(ControlEvent.Calibration(kind, calStep, 0f, "Calibration cancelled", done = true, result = null))
+    }
+
+    private fun boundPose(p: Pose, cfg: EngineConfig) =
+        cfg.binds.any { it.enabled && it.action != SystemAction.NONE && (it.first.pose == p || it.second?.pose == p) }
+
+    private fun cooling(t: Long) = t - lastPoseT < config.poseCooldownMs
 
     // ---------------------------------------------------------------- disarmed
 
@@ -144,50 +213,48 @@ class GestureEngine(config: EngineConfig, private val emit: (ControlEvent) -> Un
         }
     }
 
-    /** While disarmed the hand is still followed (no events) so the preview can show cursor, pinch and click state. */
+    /** While disarmed the hand is still followed (no events) so the preview can show the cursor, taps and confidence. */
     private fun observeDisarmed(t: Long, hand: TrackedHand?, aspect: Float) {
         if (armed) return
         val cfg = config
         if (hand == null) {
             if (handPresent && t - lastHandMs > cfg.handLostGraceMs) {
                 handPresent = false
-                click.reset()
-                activeCenter = null
-                palmHistory.clear(); pointerHistory.clear()
+                resetHandTracking()
             }
             return
         }
         lastHandMs = t
         track(t, hand, aspect)
         val f = hand.feat
-        if (click.update(t, f.indexExt, px, py, f.palmCenter, f.palmSize, enabled = armHold.current == null, cfg)) {
-            lastClickT = t
-        }
-        click.takeReject()?.let { emit(ControlEvent.ClickRejected(it)) }
-        cursorU = px / cfg.screenW
-        cursorV = py / cfg.screenH
-        lastPinchReady = pinchReady(f, cfg)
+        val p = push.update(t, f, ox / cfg.screenW, oy / cfg.screenH, enabled = false, frozen = false, cfg)
+        updateAim(t, p)
+        updateConfidence(t, f)
+        flick.update(t, f, palmSpeed, enabled = false, cfg)
+        gate.observe(t, f, palmSpeed)
+        if (calibrating == null) updateTouch(t, hand.obs, f, live = false)
+        cursorU = ox / cfg.screenW
+        cursorV = oy / cfg.screenH
     }
 
     private fun arm(t: Long) {
         armed = true
         armProgressShown = 0f
         matcher.reset()
-        bladeHold.reset()
         resetHandState()
         lastHandMs = t
+        // The arm sign was just held: the hand is changing shape.
+        lastPoseT = t
         emit(ControlEvent.Armed)
     }
 
     private fun disarm(reason: DisarmReason) {
         if (!armed) return
         endTouch()
-        exitSwipeMode()
         armed = false
         armProgressShown = 0f
         bindShown = null
         matcher.reset()
-        bladeHold.reset()
         resetHandState()
         emit(ControlEvent.Disarmed(reason))
     }
@@ -197,7 +264,8 @@ class GestureEngine(config: EngineConfig, private val emit: (ControlEvent) -> Un
     private fun processArmed(t: Long, hand: TrackedHand?, all: List<TrackedHand>, armSeen: Boolean, aspect: Float) {
         val cfg = config
         if (hand == null) {
-            if (handPresent && t - lastHandMs > cfg.handLostGraceMs) onHandLost()
+            if (handPresent && t - lastHandMs > cfg.handLostGraceMs) onHandLost(t, aspect)
+            else if (handPresent) flick.onHandLost(t, aspect, cfg)?.let { onFlick(t, it) }
             if (t - lastHandMs > cfg.autoDisarmMs) {
                 disarm(DisarmReason.TIMEOUT)
                 return
@@ -213,6 +281,7 @@ class GestureEngine(config: EngineConfig, private val emit: (ControlEvent) -> Un
         track(t, hand, aspect)
         val obs = hand.obs
         val feat = hand.feat
+        val calib = calibrating != null
 
         // Disarm with the arm sign (not while touching).
         if (touch == Touch.IDLE) {
@@ -229,47 +298,45 @@ class GestureEngine(config: EngineConfig, private val emit: (ControlEvent) -> Un
                 emitArmProgress(0f, disarming = true)
             }
         }
+        val signHeld = armHold.current != null
+        val cooldown = cooling(t)
 
-        // Swipe mode: arming with a held flat hand, then strokes along the armed axis.
-        updateSwipeMode(t, feat)
-        if (swipeAxis != null) {
-            click.cancel()
-            matcher.update(t, emptyList(), cfg.binds, cfg.signGapMs, enabled = false)
-            cancelBindProgress()
-            cursorU = px / cfg.screenW
-            cursorV = py / cfg.screenH
-            if (pointerVisible) {
-                pointerVisible = false
-                emit(ControlEvent.Pointer(cursorU, cursorV, visible = false, touching = false))
-            }
-            detectStroke(t)
-            return
+        // Swipes: still open palm, then a flick.
+        val flickEnabled = cfg.swipesEnabled && touch == Touch.IDLE && !signHeld && !calib && !cooldown
+        val dir = flick.update(t, feat, palmSpeed, flickEnabled, cfg)
+        // Freeze the pointer once the open hand clearly flicks (not for ordinary open-palm moves).
+        val fast = flick.moving && palmSpeed >= cfg.flickMinPeakSpeed * 0.5f
+        if ((fast || dir != null) && t >= flickFreezeUntil) {
+            val back = lookback(t - FLICK_LOOKBACK_MS)
+            flickX = back?.x ?: ox
+            flickY = back?.y ?: oy
         }
+        if (fast) flickFreezeUntil = maxOf(flickFreezeUntil, t + 1)
+        dir?.let { onFlick(t, it) }
+        val flicking = fast || t < flickFreezeUntil
 
-        updateTouch(t, obs, feat)
-        lastPinchReady = pinchReady(feat, cfg)
+        // Air push.
+        val pushEnabled = cfg.pushClicks && !signHeld && !calib && !flicking && touchSource != TouchSource.TAP
+        val p = push.update(t, feat, ox / cfg.screenW, oy / cfg.screenH, pushEnabled, frozen = touchSource == TouchSource.PUSH, cfg)
+        updateAim(t, if (pushEnabled) p else 0f)
+        updateConfidence(t, feat)
+
+        gate.observe(t, feat, palmSpeed)
+        if (!calib && !signHeld) updateTouch(t, obs, feat, live = true)
 
         // Binds (one hand or two hands held).
-        runBinds(t, all, enabled = touch == Touch.IDLE && armHold.current == null)
-
-        // Click: index curl and release.
-        val clickEnabled = touch == Touch.IDLE && !matcher.holding && armHold.current == null && bladeHold.current == null
-        if (click.update(t, feat.indexExt, px, py, feat.palmCenter, feat.palmSize, clickEnabled, cfg)) {
-            lastTouchEnd = t
-            lastClickT = t
-            emit(ControlEvent.Tap(click.clickX / cfg.screenW, click.clickY / cfg.screenH, click = true))
-        }
-        click.takeReject()?.let { emit(ControlEvent.ClickRejected(it)) }
+        runBinds(t, all, enabled = touch == Touch.IDLE && !signHeld && !flicking && !calib)
+        if (matcher.holding) lastPoseT = t
 
         // Pointer output.
-        val holding = matcher.holding || bladeHold.current != null
+        val holding = matcher.holding
         if (holding) {
             if (holdFreezeStart == NEVER) {
                 holdFreezeStart = t
                 // The hand started changing shape a little before the pose was recognised.
                 val back = lookback(t - HOLD_FREEZE_LOOKBACK_MS)
-                freezeX = back?.x ?: px
-                freezeY = back?.y ?: py
+                freezeX = back?.x ?: ox
+                freezeY = back?.y ?: oy
             }
         } else {
             holdFreezeStart = NEVER
@@ -277,38 +344,137 @@ class GestureEngine(config: EngineConfig, private val emit: (ControlEvent) -> Un
         val (dx, dy) = when {
             touch == Touch.PENDING -> downX to downY
             holding -> freezeX to freezeY
+            flicking -> flickX to flickY
             touch == Touch.DRAGGING -> dragX() to dragY()
-            else -> px to py
+            else -> ox to oy
         }
         pointerVisible = true
         cursorU = dx / cfg.screenW
         cursorV = dy / cfg.screenH
+        val att = attention.score
         emit(
             ControlEvent.Pointer(
                 cursorU, cursorV, visible = true, touching = touch != Touch.IDLE,
-                press = if (click.state == ClickDetector.State.CURLING) click.progress.coerceAtLeast(0.05f) else 0f,
+                closing = closing(feat, cfg),
+                push = if (cfg.pushClicks) p else 0f,
+                touchSource = touchSource,
+                holdMs = if (touch != Touch.IDLE) t - downT else 0L,
+                dragging = touch == Touch.DRAGGING,
+                edge = edge,
+                confidence = pointerConfidence,
+                angleWarn = angleWarn,
+                looking = if (cfg.attentionCalibration == null || att < 0f || att == Attention.NEUTRAL) null else att >= cfg.attentionLooking,
+                cooldown = cooldown,
             )
         )
     }
 
-    /** Follows the palm centre: maps it to the screen, filters it and keeps the histories. */
+    /** Follows the palm centre: maps it to the screen through the hand-safe region, filters it, keeps the histories. */
     private fun track(t: Long, hand: TrackedHand, aspect: Float) {
         val cfg = config
         val feat = hand.feat
         if (!handPresent) {
             handPresent = true
-            fx.reset(); fy.reset()
-            palmHistory.clear(); pointerHistory.clear()
-            click.reset()
+            resetHandTracking()
+            lastTrackT = t
+            // A hand coming into view is not a deliberate gesture yet.
+            lastPoseT = maxOf(lastPoseT, t)
         }
         body.updateHand(feat)
-        val (u, v) = PointerMap.map(feat.palmCenter, aspect, cfg.pointerGain)
-        px = fx.filter((u * cfg.screenW).toDouble(), t).toFloat()
-        py = fy.filter((v * cfg.screenH).toDouble(), t).toFloat()
-        pointerHistory.addLast(Sample(t, px, py))
+        val dt = (t - lastTrackT).coerceIn(1L, 200L)
+        lastTrackT = t
+        // The region follows the hand's size slowly, and not at all while touching or pushing (pushing grows the hand).
+        if (palmSizeSmooth == 0f) {
+            palmSizeSmooth = feat.palmSize
+        } else if (touch == Touch.IDLE && push.proximity < 0.2f) {
+            palmSizeSmooth += (feat.palmSize - palmSizeSmooth) * (1f - exp(-dt / REGION_TAU_MS))
+        }
+        region = PointerMap.region(palmSizeSmooth, aspect, cfg.safeTop, cfg.safeBottom, cfg.safeSide, cfg.pointerGain)
+        regionAspect = aspect
+        val m = PointerMap.map(feat.palmCenter, region)
+        edge = m.edge
+        val first = pointerHistory.isEmpty()
+        px = fx.filter((m.u * cfg.screenW).toDouble(), t).toFloat()
+        py = fy.filter((m.v * cfg.screenH).toDouble(), t).toFloat()
+        if (first) { prevPx = px; prevPy = py; ox = px; oy = py }
+        // Jitter: second difference of the palm position (smooth motion ≈ 0, landmark noise > 0).
+        if (palmHistory.size >= 2) {
+            val a = palmHistory[palmHistory.size - 2]
+            val b = palmHistory.last()
+            val jx = feat.palmCenter.x - 2 * b.x + a.x
+            val jy = feat.palmCenter.y - 2 * b.y + a.y
+            val j = sqrt(jx * jx + jy * jy) / feat.palmSize.coerceAtLeast(1e-4f)
+            jitter += (j - jitter) * 0.3f
+        }
         palmHistory.addLast(Sample(t, feat.palmCenter.x, feat.palmCenter.y))
-        trim(pointerHistory, t)
         trim(palmHistory, t)
+        palmSpeed = speedOf(palmHistory, t) / feat.palmSize.coerceAtLeast(1e-4f)
+    }
+
+    /**
+     * The output pointer: follows the palm pointer, except that approaching the air plane slows it
+     * down (so pushing does not drag the aim) and a push touch moves it at [EngineConfig.pushDragGain].
+     * The offset this creates melts away once the hand is back from the plane.
+     */
+    private fun updateAim(t: Long, proximity: Float) {
+        val cfg = config
+        val dx = px - prevPx
+        val dy = py - prevPy
+        prevPx = px; prevPy = py
+        when {
+            touchSource == TouchSource.PUSH -> { ox += dx * cfg.pushDragGain; oy += dy * cfg.pushDragGain }
+            touchSource == TouchSource.TAP -> { ox += dx; oy += dy }
+            proximity >= cfg.pushMagnetFrom -> {
+                val k = ((proximity - cfg.pushMagnetFrom) / (1f - cfg.pushMagnetFrom).coerceAtLeast(0.05f)).coerceIn(0f, 1f)
+                val g = 1f + (cfg.pushMagnetGain - 1f) * k
+                ox += dx * g; oy += dy * g
+            }
+            else -> {
+                ox += dx; oy += dy
+                val k = 1f - exp(-(t - (pointerHistory.lastOrNull()?.t ?: t)).coerceIn(1L, 200L) / AIM_RETURN_TAU_MS)
+                ox += (px - ox) * k; oy += (py - oy) * k
+            }
+        }
+        ox = ox.coerceIn(0f, cfg.screenW.toFloat())
+        oy = oy.coerceIn(0f, cfg.screenH.toFloat())
+        pointerHistory.addLast(Sample(t, ox, oy))
+        trim(pointerHistory, t)
+    }
+
+    /** Hand angle against the calibrated pose, and the pointer confidence (angle, steadiness, gaze, frame edge). */
+    private fun updateConfidence(t: Long, f: HandFeatures) {
+        val cfg = config
+        val a = f.angleTo(cfg.handReference)
+        angleDeg += (a - angleDeg) * 0.35f
+        val warn = TapGate.smoothstep(angleDeg, cfg.angleToleranceDeg, cfg.angleToleranceDeg + cfg.angleBlockExtraDeg)
+        angleWarn += (warn - angleWarn) * 0.35f
+        var sum = 0.0
+        var wsum = 0.0
+        fun add(score: Float, w: Double) {
+            sum += w * ln(score.coerceIn(0.02f, 1f).toDouble()); wsum += w
+        }
+        add(TapGate.angleScore(angleDeg, cfg), 2.0)
+        add(1f - 0.8f * TapGate.smoothstep(jitter, 0.03f, 0.15f), 1.0)
+        if (edge != 0) add(0.6f, 0.5)
+        val att = attention.score
+        if (cfg.attentionCalibration != null && att >= 0f && att != Attention.NEUTRAL) add(0.2f + 0.8f * att, 1.5)
+        pointerConfidence = exp(sum / wsum).toFloat()
+    }
+
+    private fun onFlick(t: Long, dir: SwipeDir) {
+        val cfg = config
+        if (flickFreezeUntil == NEVER || t > flickFreezeUntil) {
+            val back = lookback(t - FLICK_LOOKBACK_MS)
+            flickX = back?.x ?: ox
+            flickY = back?.y ?: oy
+        }
+        emit(ControlEvent.Swipe(dir))
+        matcher.cancel()
+        cancelBindProgress()
+        push.reset()
+        lastPoseT = t
+        // Keep the pointer where it was before the flick until the hand settles.
+        flickFreezeUntil = t + FLICK_FREEZE_MS
     }
 
     private fun runBinds(t: Long, all: List<TrackedHand>, enabled: Boolean) {
@@ -320,7 +486,7 @@ class GestureEngine(config: EngineConfig, private val emit: (ControlEvent) -> Un
                 val b = r.fired
                 cancelBindProgress()
                 palmHistory.clear()
-                click.cancel()
+                lastPoseT = t
                 emit(ControlEvent.BindFired(b.action, b.appPackage, b.actionLabel))
             }
             cand != null -> {
@@ -335,152 +501,231 @@ class GestureEngine(config: EngineConfig, private val emit: (ControlEvent) -> Un
         }
     }
 
-    private fun pinchReady(feat: HandFeatures, cfg: EngineConfig) =
-        feat.upright(cfg.pinchMaxTiltDeg, cfg.pinchMinUpright) && feat.indexReach > cfg.pinchMinIndexReach
+    /** 0 = thumb and index apart, 1 = touching. */
+    private fun closing(feat: HandFeatures, cfg: EngineConfig): Float {
+        if (touchSource == TouchSource.TAP) return 1f
+        val far = CLOSING_FEEDBACK_FROM
+        return ((far - feat.pinchRatio) / (far - cfg.tapEnter)).coerceIn(0f, 1f)
+    }
 
-    private fun updateTouch(t: Long, obs: HandObservation, feat: HandFeatures) {
+    private fun contactStarts(obs: HandObservation, feat: HandFeatures, cfg: EngineConfig) =
+        feat.pinchRatio < cfg.tapEnter &&
+            feat.indexReach > cfg.tapMinIndexReach &&
+            !(obs.gesture == Signs.CLOSED_FIST && obs.gestureScore > 0.7f)
+
+    /**
+     * The touch state machine shared by finger taps and air pushes. While disarmed ([live] false) it
+     * only records taps for the preview.
+     */
+    private fun updateTouch(t: Long, obs: HandObservation, feat: HandFeatures, live: Boolean) {
         val cfg = config
         val w = cfg.screenW.toFloat()
         val h = cfg.screenH.toFloat()
-        val pinched = if (touch == Touch.IDLE) {
-            feat.pinchRatio < cfg.pinchEnter &&
-                feat.indexReach > cfg.pinchMinIndexReach &&
-                feat.upright(cfg.pinchMaxTiltDeg, cfg.pinchMinUpright) &&
-                !(obs.gesture == Signs.CLOSED_FIST && obs.gestureScore > 0.7f)
-        } else {
-            feat.pinchRatio < cfg.pinchExit && feat.tiltDeg <= cfg.pinchHoldTiltDeg
+        if (feat.pinchRatio > cfg.tapExit) tapRejected = false
+        if (!push.pressed) pushRejected = false
+        if (touch == Touch.IDLE) {
+            val cooldown = cooling(t)
+            when {
+                cfg.tapClicks && !tapRejected && contactStarts(obs, feat, cfg) -> {
+                    val v = gate.judge(t, angleDeg, attention.score, cooldown, push = false, cfg)
+                    if (v.ok) {
+                        push.release()
+                        val back = lookback(t - cfg.touchLookbackMs)
+                        begin(t, TouchSource.TAP, back?.x ?: ox, back?.y ?: oy)
+                    } else {
+                        tapRejected = true
+                        if (live) emit(ControlEvent.ClickRejected("tap: ${v.reason}"))
+                    }
+                }
+                live && push.pressed && cfg.pushClicks && !pushRejected -> {
+                    val v = gate.judge(t, angleDeg, attention.score, cooldown, push = true, cfg)
+                    if (v.ok) {
+                        begin(t, TouchSource.PUSH, ox, oy)
+                    } else {
+                        pushRejected = true
+                        emit(ControlEvent.ClickRejected("push: ${v.reason}"))
+                    }
+                }
+            }
+            return
         }
+        val pressed = when (touchSource) {
+            TouchSource.TAP -> feat.pinchRatio < cfg.tapExit
+            else -> push.pressed
+        }
+        val tapMax = if (touchSource == TouchSource.PUSH) cfg.pushTapMaxMs else cfg.tapMaxMs
+        val slop = if (touchSource == TouchSource.PUSH) cfg.dragSlopPx * cfg.pushDragGain else cfg.dragSlopPx
         when (touch) {
-            Touch.IDLE -> if (pinched) {
-                // A recognised pinch wins over an index curl that may have started while the fingers closed.
-                click.cancel("pinch")
-                touch = Touch.PENDING
-                downT = t
-                val back = lookback(t - cfg.touchLookbackMs)
-                downX = back?.x ?: px
-                downY = back?.y ?: py
-            }
+            Touch.IDLE -> {}
             Touch.PENDING -> when {
-                !pinched -> {
-                    touch = Touch.IDLE
-                    lastTouchEnd = t
-                    emit(ControlEvent.Tap(downX / w, downY / h))
+                !pressed -> {
+                    val click = touchSource == TouchSource.TAP
+                    finishTouch()
+                    if (click) lastClickT = t
+                    if (live) emit(ControlEvent.Tap(downX / w, downY / h, click = click))
                 }
-                hypot(dragX() - downX, dragY() - downY) > cfg.dragSlopPx || t - downT > cfg.tapMaxMs -> {
+                hypot(dragX() - downX, dragY() - downY) > slop || t - downT > tapMax -> {
                     touch = Touch.DRAGGING
-                    emit(ControlEvent.TouchDown(downX / w, downY / h))
-                    emit(ControlEvent.TouchMove(dragX() / w, dragY() / h))
+                    if (live) {
+                        emit(ControlEvent.TouchDown(downX / w, downY / h))
+                        emit(ControlEvent.TouchMove(dragX() / w, dragY() / h))
+                    }
                 }
             }
-            Touch.DRAGGING -> if (!pinched) {
-                touch = Touch.IDLE
-                lastTouchEnd = t
-                emit(ControlEvent.TouchUp(dragX() / w, dragY() / h))
-            } else {
+            Touch.DRAGGING -> if (!pressed) {
+                if (live) emit(ControlEvent.TouchUp(dragX() / w, dragY() / h))
+                finishTouch()
+            } else if (live) {
                 emit(ControlEvent.TouchMove(dragX() / w, dragY() / h))
             }
         }
     }
 
-    private fun dragX() = px.coerceIn(0f, config.screenW.toFloat())
-    private fun dragY() = py.coerceIn(0f, config.screenH.toFloat())
+    private fun begin(t: Long, source: TouchSource, x: Float, y: Float) {
+        touch = Touch.PENDING
+        touchSource = source
+        downT = t
+        downX = x
+        downY = y
+        ox = x; oy = y
+    }
 
-    // ---------------------------------------------------------------- swipes
+    private fun finishTouch() {
+        touch = Touch.IDLE
+        touchSource = null
+    }
 
-    private fun updateSwipeMode(t: Long, feat: HandFeatures) {
-        val cfg = config
-        val blade = feat.blade(cfg.bladeMinAxis)
-        val axis = swipeAxis
-        if (axis != null) {
-            if (blade == bladeFor(axis)) bladeLastSeen = t
-            else if (t - bladeLastSeen > cfg.swipeModeExitMs) exitSwipeMode()
+    private fun dragX() = ox.coerceIn(0f, config.screenW.toFloat())
+    private fun dragY() = oy.coerceIn(0f, config.screenH.toFloat())
+
+    // ---------------------------------------------------------------- calibration
+
+    private fun updateCalibration(t: Long, hand: TrackedHand?, face: FaceObservation?) {
+        val kind = calibrating ?: return
+        val dt = (t - calPrevT).coerceIn(0L, 200L)
+        calPrevT = t
+        if (t - calStartT > if (kind == CalibrationKind.PUSH) CAL_PUSH_TIMEOUT_MS else CAL_TIMEOUT_MS) {
+            finishCalibration(kind, null, if (kind == CalibrationKind.ATTENTION) "No face seen" else "No steady hand seen")
             return
         }
-        val idle = touch == Touch.IDLE && !matcher.holding && armHold.current == null
-        bladeHold.update(if (idle) blade?.name else null, t, BLADE_GAP_MS)
-        val cur = bladeHold.current
-        if (cur == null) {
-            bladeHoldStart = NEVER
-            emitSwipeProgress(0f)
-            return
+        when (kind) {
+            CalibrationKind.HAND -> {
+                if (hand == null) return
+                calStepMs += dt
+                calNormals += hand.feat.canonicalNormal
+                if (calStepMs >= CAL_HAND_MS) {
+                    var x = 0f; var y = 0f; var z = 0f
+                    for (n in calNormals) { x += n.x; y += n.y; z += n.z }
+                    val len = sqrt(x * x + y * y + z * z)
+                    if (len < 1e-3f) finishCalibration(kind, null, "Hand not seen clearly")
+                    else finishCalibration(kind, floatArrayOf(x / len, y / len, z / len), "Hand angle calibrated")
+                } else {
+                    maybeEmitCalibration(t, calStepMs.toFloat() / CAL_HAND_MS)
+                }
+            }
+            CalibrationKind.PUSH -> updatePushCalibration(t, dt, hand)
+            CalibrationKind.ATTENTION -> {
+                if (face == null) return
+                calStepMs += dt
+                calFaces += face
+                if (calStepMs >= CAL_ATTENTION_MS) {
+                    val c = Attention.calibrate(calFaces)
+                    if (c == null) finishCalibration(kind, null, "Face not seen clearly")
+                    else finishCalibration(kind, floatArrayOf(c.yaw, c.pitch, c.spread), "Gaze calibrated")
+                } else {
+                    maybeEmitCalibration(t, calStepMs.toFloat() / CAL_ATTENTION_MS)
+                }
+            }
         }
-        if (bladeHold.startedAt != bladeHoldStart) {
-            bladeHoldStart = bladeHold.startedAt
-            bladeStartPalm = feat.palmCenter
-        }
-        val start = bladeStartPalm ?: feat.palmCenter
-        if (feat.palmCenter.dist2d(start) / feat.palmSize > cfg.swipeArmMaxDrift) {
-            // Moving: restart the hold from here.
-            bladeHold.cancel()
-            bladeHold.update(blade?.name, t, BLADE_GAP_MS)
-            bladeHoldStart = bladeHold.startedAt
-            bladeStartPalm = feat.palmCenter
-            emitSwipeProgress(0f)
-            return
-        }
-        val elapsed = bladeHold.elapsed()
-        if (elapsed >= cfg.swipeArmHoldMs) {
-            bladeHold.fire()
-            bladeHoldStart = NEVER
-            swipeProgressShown = 0f
-            val a = if (cur == BladeAxis.VERTICAL.name) SwipeAxis.HORIZONTAL else SwipeAxis.VERTICAL
-            swipeAxis = a
-            bladeLastSeen = t
-            palmHistory.clear()
-            click.cancel()
-            emit(ControlEvent.SwipeMode(a))
+    }
+
+    /**
+     * Air plane at 5 points (centre, then the corners). At each: point at the dot and hold still
+     * (hover depth), then push toward the screen and hold (plane depth).
+     */
+    private fun updatePushCalibration(t: Long, dt: Long, hand: TrackedHand?) {
+        if (hand == null || !push.hasSignal) return
+        val (tu, tv) = PushCalibration.TARGETS[calStep]
+        val d = push.depth
+        if (calPhase == 0) {
+            val onTarget = hypot(cursorU - tu, (cursorV - tv) * 0.6f) < CAL_TARGET_RADIUS && palmSpeed < CAL_STILL_SPEED
+            if (onTarget) {
+                calStepMs += dt
+                calValues += d
+            } else {
+                calStepMs = 0L
+                calValues.clear()
+            }
+            if (calStepMs >= CAL_HOVER_MS) {
+                calHover = calValues.sorted()[calValues.size / 2]
+                calValues.clear()
+                calPhase = 1
+                calStepMs = 0L
+                emitCalibration(0f)
+            } else {
+                maybeEmitCalibration(t, calStepMs.toFloat() / CAL_HOVER_MS)
+            }
         } else {
-            emitSwipeProgress((elapsed.toFloat() / cfg.swipeArmHoldMs).coerceIn(0.01f, 0.99f))
+            // Pushing: count only once the hand is clearly closer than the hover.
+            if (d - calHover > CAL_PUSH_START) {
+                calStepMs += dt
+                calValues += d
+            }
+            if (calStepMs >= CAL_PRESS_MS) {
+                val sorted = calValues.sorted()
+                val plane = sorted[(sorted.size * 0.7f).toInt().coerceAtMost(sorted.size - 1)]
+                if (plane - calHover < MIN_PUSH_DEPTH) {
+                    calValues.clear()
+                    calStepMs = 0L
+                    emit(ControlEvent.Calibration(CalibrationKind.PUSH, calStep, 0f, "Push a little further toward the screen", targetX = tu, targetY = tv))
+                    return
+                }
+                // The touch triggers a little before the full push, so it is reachable without straining.
+                calResult += listOf(tu, tv, calHover, calHover + (plane - calHover) * 0.85f)
+                calValues.clear()
+                calStepMs = 0L
+                calPhase = 0
+                calStep++
+                if (calStep >= PushCalibration.TARGETS.size) {
+                    finishCalibration(CalibrationKind.PUSH, calResult.toFloatArray(), "Air push calibrated")
+                } else {
+                    emitCalibration(0f)
+                }
+            } else {
+                maybeEmitCalibration(t, calStepMs.toFloat() / CAL_PRESS_MS)
+            }
         }
     }
 
-    private fun detectStroke(t: Long) {
-        val cfg = config
-        val axis = swipeAxis ?: return
-        val start = t - cfg.flickWindowMs
-        val samples = palmHistory.filter { it.t >= start }
-        if (samples.size < 3) return
-        val first = samples.first()
-        val last = samples.last()
-        val dx = last.x - first.x
-        val dy = last.y - first.y
-        val threshold = cfg.flickMinShoulders * body.shoulderWidth.coerceAtLeast(0.05f) /
-            cfg.swipeSensitivity.coerceIn(0.25f, 4f)
-        val along = if (axis == SwipeAxis.HORIZONTAL) dx else dy
-        val across = if (axis == SwipeAxis.HORIZONTAL) dy else dx
-        if (abs(along) < threshold || abs(along) < abs(across) * cfg.flickAxisRatio) return
-        val dir = if (axis == SwipeAxis.HORIZONTAL) {
-            if (along > 0) SwipeDir.RIGHT else SwipeDir.LEFT
-        } else {
-            if (along > 0) SwipeDir.DOWN else SwipeDir.UP
+    private fun maybeEmitCalibration(t: Long, progress: Float) {
+        if (t - calLastEmit > CAL_EMIT_MS) emitCalibration(progress)
+    }
+
+    private fun emitCalibration(progress: Float) {
+        val kind = calibrating ?: return
+        calLastEmit = lastT
+        var tx = -1f
+        var ty = -1f
+        val msg = when (kind) {
+            CalibrationKind.HAND -> "Hold your hand as you use it, palm toward the screen"
+            CalibrationKind.ATTENTION -> "Look at the dot in the centre of the screen"
+            CalibrationKind.PUSH -> {
+                val (u, v) = PushCalibration.TARGETS[calStep]
+                tx = u; ty = v
+                val n = "${calStep + 1}/${PushCalibration.TARGETS.size}"
+                if (calPhase == 0) "$n  Point at the dot and hold still" else "$n  Push toward the screen as if touching it, and hold"
+            }
         }
-        if (t - lastSwipeT < cfg.swipeCooldownMs) return
-        if (lastSwipeDir == dir.opposite && t - lastSwipeT < cfg.swipeOppositeBlockMs) return
-        lastSwipeT = t
-        lastSwipeDir = dir
-        palmHistory.clear()
-        emit(ControlEvent.Swipe(dir))
+        val overall = if (kind == CalibrationKind.PUSH) {
+            (calStep + (calPhase + progress.coerceIn(0f, 1f)) / 2f) / PushCalibration.TARGETS.size
+        } else progress
+        emit(ControlEvent.Calibration(kind, calStep, overall.coerceIn(0f, 1f), msg, targetX = tx, targetY = ty))
     }
 
-    private fun exitSwipeMode() {
-        if (swipeAxis != null) {
-            swipeAxis = null
-            swipeProgressShown = 0f
-            palmHistory.clear()
-            emit(ControlEvent.SwipeMode(null))
-        } else {
-            emitSwipeProgress(0f)
-        }
-        bladeHoldStart = NEVER
+    private fun finishCalibration(kind: CalibrationKind, result: FloatArray?, msg: String) {
+        calibrating = null
+        emit(ControlEvent.Calibration(kind, calStep, 1f, msg, done = true, result = result))
     }
-
-    private fun emitSwipeProgress(p: Float) {
-        if (p == 0f && swipeProgressShown == 0f) return
-        swipeProgressShown = p
-        emit(ControlEvent.SwipeMode(null, p))
-    }
-
-    private fun bladeFor(axis: SwipeAxis) = if (axis == SwipeAxis.HORIZONTAL) BladeAxis.VERTICAL else BladeAxis.HORIZONTAL
 
     // ---------------------------------------------------------------- helpers
 
@@ -497,23 +742,28 @@ class GestureEngine(config: EngineConfig, private val emit: (ControlEvent) -> Un
         return chosen
     }
 
-    private fun onHandLost() {
+    private fun onHandLost(t: Long, aspect: Float) {
+        flick.onHandLost(t, aspect, config)?.let { onFlick(t, it) }
         handPresent = false
         endTouch()
-        exitSwipeMode()
-        bladeHold.cancel()
-        click.reset()
-        activeCenter = null
-        palmHistory.clear()
+        resetHandTracking()
         if (pointerVisible) {
             pointerVisible = false
-            val last = pointerHistory.lastOrNull()
-            val cfg = config
-            emit(ControlEvent.Pointer((last?.x ?: 0f) / cfg.screenW, (last?.y ?: 0f) / cfg.screenH, visible = false, touching = false))
+            emit(ControlEvent.Pointer(cursorU, cursorV, visible = false, touching = false))
         }
-        pointerHistory.clear()
         matcher.cancel()
         cancelBindProgress()
+    }
+
+    private fun resetHandTracking() {
+        fx.reset(); fy.reset()
+        palmHistory.clear(); pointerHistory.clear()
+        gate.reset()
+        push.reset()
+        flick.reset()
+        palmSizeSmooth = 0f
+        jitter = 0f
+        activeCenter = null
     }
 
     /** Lifts an active drag (a pending tap is dropped). */
@@ -522,22 +772,21 @@ class GestureEngine(config: EngineConfig, private val emit: (ControlEvent) -> Un
             val cfg = config
             emit(ControlEvent.TouchUp(dragX() / cfg.screenW, dragY() / cfg.screenH))
         }
-        if (touch != Touch.IDLE) lastTouchEnd = lastT
         touch = Touch.IDLE
+        touchSource = null
+        push.release()
     }
 
     private fun resetHandState() {
         handPresent = false
         pointerVisible = false
         touch = Touch.IDLE
-        swipeAxis = null
-        swipeProgressShown = 0f
-        bladeHoldStart = NEVER
+        touchSource = null
         holdFreezeStart = NEVER
-        click.reset()
-        fx.reset(); fy.reset()
-        palmHistory.clear(); pointerHistory.clear()
-        activeCenter = null
+        flickFreezeUntil = NEVER
+        tapRejected = false
+        pushRejected = false
+        resetHandTracking()
     }
 
     private fun lookback(target: Long): Sample? {
@@ -546,6 +795,20 @@ class GestureEngine(config: EngineConfig, private val emit: (ControlEvent) -> Un
             if (s.t <= target) best = s else break
         }
         return best ?: pointerHistory.firstOrNull()
+    }
+
+    /** Speed over the last ~[SPEED_WINDOW_MS] in history units per second. */
+    private fun speedOf(q: ArrayDeque<Sample>, t: Long): Float {
+        if (q.size < 2) return 0f
+        val last = q.last()
+        var ref = q.first()
+        for (i in q.indices.reversed()) {
+            val s = q[i]
+            if (t - s.t >= SPEED_WINDOW_MS) { ref = s; break }
+        }
+        if (ref === last) return 0f
+        val dt = (last.t - ref.t).coerceAtLeast(1L)
+        return hypot(last.x - ref.x, last.y - ref.y) * 1000f / dt
     }
 
     private fun trim(q: ArrayDeque<Sample>, t: Long) {
@@ -578,6 +841,8 @@ class GestureEngine(config: EngineConfig, private val emit: (ControlEvent) -> Un
         val cfg = config
         val f = hand?.feat
         val prev = debug
+        val r = region
+        val a = regionAspect.coerceAtLeast(0.1f)
         debug = EngineDebug(
             t = t,
             armed = armed,
@@ -590,25 +855,25 @@ class GestureEngine(config: EngineConfig, private val emit: (ControlEvent) -> Un
             cursorU = cursorU,
             cursorV = cursorV,
             gain = cfg.pointerGain,
-            pinch = f?.pinchRatio ?: 0f,
-            pinchEnter = cfg.pinchEnter,
-            pinchExit = cfg.pinchExit,
-            pinchReady = hand != null && lastPinchReady,
+            gap = f?.pinchRatio ?: 0f,
+            tapEnter = cfg.tapEnter,
+            tapExit = cfg.tapExit,
             touch = touch.name,
-            tiltDeg = f?.tiltDeg ?: 0f,
-            upright = f?.upright(cfg.pinchMaxTiltDeg, cfg.pinchMinUpright) ?: false,
-            reach = f?.indexExt ?: 0f,
-            reachBaseline = if (hand != null) click.baseline else 0f,
-            curlNeeded = cfg.clickNeeded,
-            curlDepth = if (hand != null) click.depth else 0f,
-            clickState = click.state.name,
             clickAgoMs = if (lastClickT == NEVER) Long.MAX_VALUE else t - lastClickT,
-            blade = when (f?.blade(cfg.bladeMinAxis)) {
-                BladeAxis.VERTICAL -> "V"
-                BladeAxis.HORIZONTAL -> "H"
-                null -> "-"
-            },
-            swipeAxis = swipeAxis,
+            clickConfidence = gate.confidence,
+            clickFactors = gate.factors.copyOf(),
+            pointerConfidence = if (hand != null) pointerConfidence else 0f,
+            angleDeg = if (hand != null) angleDeg else 0f,
+            angleTolDeg = cfg.angleToleranceDeg,
+            push = if (hand != null) push.proximity else 0f,
+            pushCalibrated = cfg.pushCalibration != null,
+            flickReady = hand != null && flick.ready,
+            palmSpeed = if (hand != null) palmSpeed else 0f,
+            attention = attention.score,
+            cooldown = cooling(t),
+            region = floatArrayOf(r.left / a, r.top, r.right / a, r.bottom),
+            edge = if (hand != null) edge else 0,
+            touchSource = touchSource,
             bindLabel = bindShown,
             bindProgress = bindProgressNow,
             bodyVisible = body.bodyVisible,
@@ -619,7 +884,26 @@ class GestureEngine(config: EngineConfig, private val emit: (ControlEvent) -> Un
         const val NEVER = Long.MIN_VALUE / 4
         const val HISTORY_MS = 600L
         const val HOLD_FREEZE_LOOKBACK_MS = 150L
-        const val BLADE_GAP_MS = 120L
+        const val SPEED_WINDOW_MS = 90L
+        const val REGION_TAU_MS = 800f
+        const val AIM_RETURN_TAU_MS = 150f
+        const val FLICK_FREEZE_MS = 350L
+        const val FLICK_LOOKBACK_MS = 150L
+        /** Closing feedback starts when thumb and index are this close (palm sizes). */
+        const val CLOSING_FEEDBACK_FROM = 0.9f
+        const val CAL_TIMEOUT_MS = 15_000L
+        const val CAL_PUSH_TIMEOUT_MS = 90_000L
+        const val CAL_HAND_MS = 2000L
+        const val CAL_ATTENTION_MS = 3000L
+        const val CAL_HOVER_MS = 800L
+        const val CAL_PRESS_MS = 900L
+        /** Cursor within this distance (normalized screen) of the dot counts as pointing at it. */
+        const val CAL_TARGET_RADIUS = 0.14f
+        const val CAL_STILL_SPEED = 1.2f
+        /** ln(scale) growth above the hover that counts as pushing during the calibration. */
+        const val CAL_PUSH_START = 0.035f
+        const val CAL_EMIT_MS = 100L
+        const val MIN_PUSH_DEPTH = 0.05f
     }
 }
 

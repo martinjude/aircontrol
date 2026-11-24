@@ -1,5 +1,8 @@
 package app.aircontrol.ui
 
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.width
@@ -7,55 +10,69 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import androidx.compose.foundation.layout.Column
+import app.aircontrol.gesture.ClickMethod
 import app.aircontrol.gesture.SystemAction
 import app.aircontrol.settings.AppSettings
 
 @Composable
 fun HelpScreen(settings: AppSettings) {
-    Text("How to use", fontSize = 26.sp, fontWeight = FontWeight.Bold)
+    PageTitle("How to use")
 
     SectionCard("Gestures") {
-        Gesture("🤟", "Hold 1 s", "Turn gesture control on. The screen edge glows. Hold again to turn it off.")
-        Gesture("🖐", "Move your hand", "The cursor sits on the centre of your palm. The middle of the camera view is the middle of the screen and the corners of the view are the corners of the screen.")
-        Gesture("☝️", "Curl and release the index finger", "Click: bend your index finger and straighten it again, quickly. The click fires on the release, where the cursor was.")
-        Gesture("🤏", "Quick pinch, hand upright", "Also a tap. Hold your hand upright (fingers up): a horizontal hand does not pinch.")
-        Gesture("🤏", "Pinch, move, release", "Drag / scroll precisely, like a finger on the glass.")
-        Gesture("🤏", "Pinch and hold still", "Long press.")
-        Gesture("🖐", "Flat hand, palm sideways (0.3 s)", "\"Swipe armed ⟷\": stroke left or right. Stays armed while your hand stays flat.")
-        Gesture("🫳", "Flat hand, palm down (0.3 s)", "\"Swipe armed ↕\": stroke up or down.")
-        Muted("Gesture control turns itself off after ${settings.autoDisarmSec} s without a hand.")
+        Gesture("🤟", "Hold the arm sign for 1 s", "Turns gesture control on; the screen edge glows. Hold it again to turn it off.")
+        Gesture("✋", "Move your hand", "The cursor follows the centre of your palm. Keep the palm facing the screen: the edges turn orange, then red, when it turns away.")
+        if (settings.clickMethod != ClickMethod.PUSH) {
+            Gesture("👌", "Touch thumb and index", "A quick touch clicks where the cursor was. Keep them together to hold: move to drag or scroll, stay still for a long press. Two arcs close on the cursor as your fingers meet.")
+        }
+        if (settings.clickMethod != ClickMethod.TAP) {
+            Gesture("👉", "Push toward the screen", "Air push. A glow under the cursor grows as your hand nears an invisible plane; pushing through it touches the screen. Pull back to release. While pushed in, the cursor moves slowly for precise drags.")
+        }
+        if (settings.swipesEnabled) {
+            Gesture("🖐", "Still open palm, then flick", "Swipe left, right, up or down. The way back is ignored for a moment.")
+        }
+        Muted("After any pose (a bind or 🤟), taps, pushes and swipes wait a moment, so changing back to pointing never clicks. Gesture control turns itself off after ${settings.autoDisarmSec} s without a hand.")
+    }
+
+    SectionCard("The cursor") {
+        Muted("A full ring means the pointer is trusted. A thin arc around it shows the confidence when it drops: palm turned away, shaky tracking, or the hand at the edge of the frame.")
+        Muted("A green dot above the ring means your eyes are on the screen (after the gaze calibration).")
     }
 
     SectionCard("Your binds") {
         val active = settings.binds.filter { it.enabled && it.action != SystemAction.NONE }
         if (active.isEmpty()) Muted("No binds. Add some on the Binds tab.")
-        active.forEach { Gesture(it.triggerLabel, it.actionLabel, describeBind(it)) }
+        active.forEach { b ->
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.width(80.dp)) { TriggerGlyphs(b) }
+                Spacer(Modifier.width(8.dp))
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(b.actionLabel, style = AirType.BodyStrong, color = AirColors.Text)
+                    Muted(describeBind(b))
+                }
+            }
+        }
     }
 
     SectionCard("Tips for reliable tracking") {
-        Muted("• Sit or stand 0.5–2 m from the camera with your head and shoulders in frame.")
-        Muted("• Good, even light helps; avoid a bright window behind you.")
-        Muted("• Pinch with your hand upright, thumb and index facing the camera.")
-        Muted("• Click with a quick curl-and-release of the index finger; a slow curl (like making a fist) never clicks.")
-        Muted("• Swipe strokes should be brisk; the way back is ignored for about a second.")
-        Muted("• Use Camera → Live tracking, or Settings → Look → Live tracking preview (on top of any app), to see what is detected and why a click was or wasn't recognised.")
+        Muted("Stay 0.5 to 2 m from the camera with your head and shoulders in view.")
+        Muted("Even light helps. Avoid a bright window behind you.")
+        Muted("Run Settings, Calibration, Calibrate everything once in your usual spot: hand angle, air plane and gaze.")
+        Muted("If clicks still fire by accident, set Strictness to Strict or lengthen the pause after a pose.")
+        Muted("To see why a click was or wasn't accepted, set Settings, Look, Tracking view to Diagnostics. Its event log lists every rejection with the reason.")
     }
 
     SectionCard("Network camera") {
-        Muted("Use an old phone or an IP camera on the same Wi‑Fi, facing you. With the free \"IP Webcam\" Android app: start the server, then enter http://<phone IP>:8080/video on the Camera tab.")
+        Muted("Use an old phone or an IP camera on the same Wi‑Fi, facing you. With the free IP Webcam app, start the server and enter http://<phone IP>:8080/video on the Camera tab.")
         Muted("MJPEG streams have the lowest latency. RTSP works too but usually lags more.")
     }
 
     SectionCard("Troubleshooting") {
-        Muted("• Accessibility switch greyed out (\"Restricted setting\"): App info → ⋮ → Allow restricted settings.")
-        Muted("• Samsung: if installing the APK is blocked, turn off Settings → Security → Auto Blocker temporarily.")
-        Muted("• Tracking stops in the background: set Battery to Unrestricted for AirControl.")
-        Muted("• Taps do nothing: check that the AirControl accessibility service is still on (some updates turn it off).")
-        Muted("• Camera busy: another app (video call, camera) is using it; AirControl resumes when it is free.")
+        Muted("Accessibility switch greyed out (\"Restricted setting\"): App info, then ⋮, then Allow restricted settings.")
+        Muted("Samsung: if installing the APK is blocked, turn off Settings, Security, Auto Blocker for a moment.")
+        Muted("Tracking stops in the background: set Battery to Unrestricted for AirControl.")
+        Muted("Taps do nothing: check that the AirControl accessibility service is still on; some updates turn it off.")
+        Muted("Camera busy: another app is using it. AirControl resumes when it is free.")
     }
 
     SectionCard("Privacy") {
@@ -64,12 +81,12 @@ fun HelpScreen(settings: AppSettings) {
 }
 
 @Composable
-private fun Gesture(icon: String, title: String, desc: String) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Text(icon, fontSize = 28.sp, modifier = Modifier.width(56.dp))
-        Spacer(Modifier.width(4.dp))
-        Column(Modifier.weight(1f)) {
-            Text(title, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+private fun Gesture(emoji: String, title: String, desc: String) {
+    Row(verticalAlignment = Alignment.Top) {
+        Emoji(emoji, 28.dp)
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(title, style = AirType.BodyStrong, color = AirColors.Text)
             Muted(desc)
         }
     }

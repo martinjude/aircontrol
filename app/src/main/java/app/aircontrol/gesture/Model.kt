@@ -51,6 +51,8 @@ data class FrameObservation(
     val imageAspect: Float,
     val hands: List<HandObservation>,
     val pose: PoseObservation?,
+    /** Head and eye direction, when the face model runs (attention gate). */
+    val face: FaceObservation? = null,
 )
 
 /** MediaPipe canned gesture names. */
@@ -92,13 +94,21 @@ enum class SwipeDir {
         get() = when (this) { UP -> DOWN; DOWN -> UP; LEFT -> RIGHT; RIGHT -> LEFT }
 }
 
-/** Axis of an armed swipe: HORIZONTAL = left/right (vertical blade hand), VERTICAL = up/down. */
-enum class SwipeAxis { HORIZONTAL, VERTICAL }
-
-/** Orientation of a flat hand seen edge-on: VERTICAL = palm faces sideways, HORIZONTAL = palm faces floor/ceiling. */
-enum class BladeAxis { VERTICAL, HORIZONTAL }
-
 enum class DisarmReason { GESTURE, TIMEOUT, MANUAL }
+
+/** Which click gestures are active. */
+enum class ClickMethod(val label: String) { TAP("Finger tap"), PUSH("Air push"), BOTH("Both") }
+
+/** How sure the engine must be before a tap or push counts. */
+enum class ClickStrictness(val label: String, val threshold: Float) {
+    RELAXED("Relaxed", 0.35f), BALANCED("Balanced", 0.5f), STRICT("Strict", 0.65f)
+}
+
+/** What is touching the screen: thumb and index together, or a push through the air plane. */
+enum class TouchSource { TAP, PUSH }
+
+/** HAND = the comfortable palm angle, PUSH = the air plane at 5 screen points, ATTENTION = gaze on the screen. */
+enum class CalibrationKind { HAND, PUSH, ATTENTION }
 
 /** Events produced by [GestureEngine]. Coordinates are normalized to the screen (0..1). */
 sealed interface ControlEvent {
@@ -106,31 +116,60 @@ sealed interface ControlEvent {
     data class ArmProgress(val progress: Float, val disarming: Boolean) : ControlEvent
     data object Armed : ControlEvent
     data class Disarmed(val reason: DisarmReason) : ControlEvent
-    /** [press] is the click progress (0..1) while the index finger is curling. */
+    /**
+     * The cursor.
+     * - [closing]: how far thumb and index have closed toward a tap (0..1).
+     * - [push]: air-plane proximity (1 = the plane).
+     * - [touchSource], [holdMs], [dragging]: a touch in progress (dragging once it moved or became a long press).
+     * - [edge]: bitmask of the hand-safe region edges the palm presses on (1 left, 2 top, 4 right, 8 bottom).
+     * - [confidence]: how much the pointer can be trusted (hand angle, steadiness, gaze), 0..1.
+     * - [angleWarn]: 0 = the palm faces the camera as calibrated, 1 = far off (shown as a warm shade).
+     * - [looking]: the eyes are on the screen (null = unknown: no gaze calibration or no face).
+     * - [cooldown]: actions are paused right after a pose (bind / arm sign).
+     */
     data class Pointer(
         val x: Float,
         val y: Float,
         val visible: Boolean,
         val touching: Boolean,
-        val press: Float = 0f,
+        val closing: Float = 0f,
+        val push: Float = 0f,
+        val touchSource: TouchSource? = null,
+        val holdMs: Long = 0L,
+        val dragging: Boolean = false,
+        val edge: Int = 0,
+        val confidence: Float = 1f,
+        val angleWarn: Float = 0f,
+        val looking: Boolean? = null,
+        val cooldown: Boolean = false,
     ) : ControlEvent
     data class TouchDown(val x: Float, val y: Float) : ControlEvent
     data class TouchMove(val x: Float, val y: Float) : ControlEvent
     data class TouchUp(val x: Float, val y: Float) : ControlEvent
-    /** A tap; [click] = it came from the index-curl click (otherwise from a quick pinch). */
+    /** A tap; [click] = a thumb–index tap (otherwise a quick air push). */
     data class Tap(val x: Float, val y: Float, val click: Boolean = false) : ControlEvent
     data class Swipe(val dir: SwipeDir) : ControlEvent
-    /**
-     * Swipe mode: [axis] non-null = armed for strokes along it. With a null axis, [progress] > 0 is
-     * the flat-hand hold building up and 0 means swipe mode is off.
-     */
-    data class SwipeMode(val axis: SwipeAxis?, val progress: Float = if (axis != null) 1f else 0f) : ControlEvent
     /** Progress of holding a bind's gesture; 0 means abandoned. */
     data class BindProgress(val label: String, val progress: Float) : ControlEvent
     /** A bind fired: perform [action] ([appPackage] for [SystemAction.LAUNCH_APP]). */
     data class BindFired(val action: SystemAction, val appPackage: String?, val label: String) : ControlEvent
-    /** The click detector rejected a curl; for the preview / tuning only. */
+    /** A tap or push was not accepted; for the preview / tuning only. */
     data class ClickRejected(val reason: String) : ControlEvent
+    /**
+     * A calibration step: [message] tells the user what to do, [progress] 0..1 within the step,
+     * ([targetX], [targetY]) where to point (normalized screen, -1 = none).
+     * When [done], [result] holds the measured values or is null if it failed.
+     */
+    data class Calibration(
+        val kind: CalibrationKind,
+        val step: Int,
+        val progress: Float,
+        val message: String,
+        val done: Boolean = false,
+        val result: FloatArray? = null,
+        val targetX: Float = -1f,
+        val targetY: Float = -1f,
+    ) : ControlEvent
 }
 
 data class EngineConfig(
@@ -145,59 +184,82 @@ data class EngineConfig(
     /** Classification may flicker; gaps shorter than this don't break a hold. */
     val signGapMs: Long = 200,
     val binds: List<Bind> = Binds.defaults(),
+    /** After a bound pose or the arm sign, taps, pushes and swipes wait this long (the hand is changing shape). */
+    val poseCooldownMs: Long = 600,
 
-    /** Thumb-tip/index-tip distance over palm size: below enter = pinched, above exit = released. */
-    val pinchEnter: Float = 0.30f,
-    val pinchExit: Float = 0.45f,
+    val clickMethod: ClickMethod = ClickMethod.BOTH,
+    val clickStrictness: ClickStrictness = ClickStrictness.BALANCED,
+
+    // Finger tap: thumb and index tips touch. Quick = click, held = touch down (drag / long press).
+    /** Thumb-tip/index-tip distance over palm size: below enter = touching, above exit = apart. */
+    val tapEnter: Float = 0.30f,
+    val tapExit: Float = 0.45f,
     /** Rejects fists: index tip must reach this far from the wrist (relative to the index knuckle). */
-    val pinchMinIndexReach: Float = 1.15f,
-    /** A pinch only starts with the hand upright: wrist→knuckle within this angle of straight up. */
-    val pinchMaxTiltDeg: Float = 45f,
-    /** Once pinched, the hand may tilt this far before the touch is released. */
-    val pinchHoldTiltDeg: Float = 75f,
-    /** 2D/3D length of the palm axis; low when the hand points at the camera. */
-    val pinchMinUpright: Float = 0.5f,
-    val tapMaxMs: Long = 280,
+    val tapMinIndexReach: Float = 1.15f,
+    /** Touching longer than this (or moving) turns the tap into a held touch. */
+    val tapMaxMs: Long = 300,
     val dragSlopDp: Float = 22f,
-    /** Touch-down uses the pointer position from this long before the pinch closed (closing drift). */
+    /** The touch lands where the pointer was this long before the fingers met (closing drift). */
     val touchLookbackMs: Long = 80,
+    /** Before the fingers meet the palm should be this still (palm sizes / s). */
+    val tapStillSpeed: Float = 1.5f,
 
-    // Click: the index finger curls and straightens again (fires on the release).
-    /** Reach (≈2 extended, ≈1 curled) must fall at least this far below its recent maximum. */
-    val clickMinDrop: Float = 0.30f,
-    /** The dip starts being tracked after this fall. */
-    val clickOnsetDrop: Float = 0.12f,
-    /** Fraction of the dip that must be regained for the release. */
-    val clickRecovery: Float = 0.6f,
-    val clickMinDipMs: Long = 80,
-    /** Time from the start of the curl to the release; slower = a pose change, not a click. */
-    val clickMaxMs: Long = 450,
-    /** The finger must have been at least this extended just before (a real pointing finger). */
-    val clickMinBaseline: Float = 1.5f,
-    /** Palm travel during the curl, in palm sizes, above which it is not a click. */
-    val clickMaxLateral: Float = 0.6f,
-    /** The click lands where the pointer was this long before the curl began. */
-    val clickLookbackMs: Long = 60,
-    val clickRefractoryMs: Long = 300,
-    val clickSensitivity: Float = 1f,
+    // Hand angle: the palm should face the camera as in the hand calibration.
+    /** Unit palm normal of the comfortable pose (canonical form, see [HandFeatures.canonicalNormal]); null = facing the camera. */
+    val handReference: P3? = null,
+    /** Within this angle from the reference the hand is fine; beyond it the warning and the confidence drop grow. */
+    val angleToleranceDeg: Float = 25f,
+    /** Beyond tolerance + this, taps and pushes are blocked. */
+    val angleBlockExtraDeg: Float = 25f,
 
-    // Armed swipes: hold a flat hand edge-on, then stroke.
-    /** |palm normal component| needed to count as a vertical/horizontal blade. */
-    val bladeMinAxis: Float = 0.75f,
-    val swipeArmHoldMs: Long = 300,
-    /** Palm travel allowed while holding the blade to arm (palm sizes). */
-    val swipeArmMaxDrift: Float = 0.5f,
-    /** Swipe mode ends after the blade has been gone this long. */
-    val swipeModeExitMs: Long = 300,
-    val flickWindowMs: Long = 220,
-    /** Minimum palm travel within [flickWindowMs], in shoulder widths. */
-    val flickMinShoulders: Float = 0.45f,
-    val flickAxisRatio: Float = 1.5f,
+    // Air push: a virtual plane at a fixed distance from the camera (calibrated at 5 points);
+    // without a calibration it floats a fixed push in front of the resting hand.
+    val pushCalibration: PushCalibration? = null,
+    /** Uncalibrated plane: ln(hand scale) growth from rest to the plane (0.12 ≈ ~10 cm at 1 m). */
+    val pushDepth: Float = 0.12f,
+    /** Uncalibrated plane: how fast the rest position follows the hand. */
+    val pushRestTauMs: Long = 1500,
+    /** Proximity (1 = plane) at which the touch starts / ends. */
+    val pushEnter: Float = 1f,
+    val pushExit: Float = 0.8f,
+    /** From this proximity the cursor slows down so pushing does not drag the aim. */
+    val pushMagnetFrom: Float = 0.4f,
+    /** Cursor gain left at the plane. */
+    val pushMagnetGain: Float = 0.3f,
+    /** Cursor gain while pushed through (dragging precisely with an outstretched arm is hard). */
+    val pushDragGain: Float = 0.35f,
+    /** An air push is slower than a tap: in and out within this is still a tap. */
+    val pushTapMaxMs: Long = 450,
+
+    // Swipes: hold an open palm still for a moment, then flick it.
+    val swipesEnabled: Boolean = true,
+    /** Palm speed (palm sizes / s) below which the open hand counts as still. */
+    val flickStillSpeed: Float = 0.8f,
+    val flickStillMs: Long = 120,
+    /** The flick must cover [flickMinPalms] palm sizes within this window after leaving still. */
+    val flickWindowMs: Long = 350,
+    val flickMinPalms: Float = 2.0f,
+    /** Peak palm speed (palm sizes / s) a flick must reach. */
+    val flickMinPeakSpeed: Float = 6f,
+    val flickAxisRatio: Float = 1.6f,
     val swipeCooldownMs: Long = 450,
-    val swipeOppositeBlockMs: Long = 900,
-    val swipeSensitivity: Float = 0.7f,
+    /** The return stroke (opposite direction) is ignored for this long. */
+    val swipeOppositeBlockMs: Long = 700,
+    val swipeSensitivity: Float = 1f,
 
-    /** Camera frame → screen gain around the centre; 1 = camera edges are the screen edges. */
+    // Attention: gaze on the screen (needs a calibration). Raises pointer confidence; can gate clicks.
+    val attentionGate: Boolean = false,
+    val attentionCalibration: AttentionCalibration? = null,
+    /** Below this attention score a click is blocked (when the gate is on). */
+    val attentionBlockBelow: Float = 0.3f,
+    /** At or above this the eyes count as on the screen (pointer feedback). */
+    val attentionLooking: Float = 0.6f,
+
+    /** Hand-safe region margins (palm sizes): the cursor reaches the screen edges with the whole hand in view. */
+    val safeTop: Float = 1.7f,
+    val safeBottom: Float = 0.7f,
+    val safeSide: Float = 0.65f,
+    /** Gain around the centre of the hand-safe region; 1 = its edges are the screen edges. */
     val pointerGain: Float = 1f,
     /** 0 = raw/fast, 1 = very smooth. */
     val smoothing: Float = 0.5f,
@@ -207,7 +269,47 @@ data class EngineConfig(
     val requireBody: Boolean = false,
 ) {
     val dragSlopPx: Float get() = dragSlopDp * density
-    val clickNeeded: Float get() = clickMinDrop / clickSensitivity.coerceIn(0.25f, 4f)
+    val tapClicks: Boolean get() = clickMethod != ClickMethod.PUSH
+    val pushClicks: Boolean get() = clickMethod != ClickMethod.TAP
+}
+
+/** Result of the attention calibration: where the user looks when looking at the screen (degrees). */
+data class AttentionCalibration(val yaw: Float, val pitch: Float, val spread: Float)
+
+/** One calibrated air-plane point: at screen position ([u], [v]) the hand hovers at depth [hover] and touches at [plane] (ln scale). */
+data class PushPoint(val u: Float, val v: Float, val hover: Float, val plane: Float)
+
+/** The air plane measured at several screen points, interpolated in between (inverse-distance weighting). */
+data class PushCalibration(val points: List<PushPoint>) {
+    /** Hover and plane depth at screen position ([u], [v]). */
+    fun at(u: Float, v: Float): Pair<Float, Float> {
+        var wSum = 0f; var h = 0f; var p = 0f
+        for (pt in points) {
+            val d2 = (pt.u - u) * (pt.u - u) + (pt.v - v) * (pt.v - v)
+            if (d2 < 1e-6f) return pt.hover to pt.plane
+            val w = 1f / d2
+            wSum += w; h += w * pt.hover; p += w * pt.plane
+        }
+        return if (wSum == 0f) 0f to 0f else (h / wSum) to (p / wSum)
+    }
+
+    fun encode(): String = points.joinToString(";") { "${it.u},${it.v},${it.hover},${it.plane}" }
+
+    companion object {
+        /** Where the 5-point calibration asks the user to point: centre, then the four corners. */
+        val TARGETS = listOf(0.5f to 0.5f, 0.15f to 0.15f, 0.85f to 0.15f, 0.85f to 0.85f, 0.15f to 0.85f)
+
+        fun decode(s: String): PushCalibration? {
+            val pts = s.split(";").mapNotNull { part ->
+                val f = part.split(",").mapNotNull { it.toFloatOrNull() }
+                if (f.size == 4) PushPoint(f[0], f[1], f[2], f[3]) else null
+            }
+            return if (pts.size >= 1) PushCalibration(pts) else null
+        }
+
+        fun fromResult(r: FloatArray): PushCalibration =
+            PushCalibration(List(r.size / 4) { PushPoint(r[4 * it], r[4 * it + 1], r[4 * it + 2], r[4 * it + 3]) })
+    }
 }
 
 /** One immutable snapshot of what the engine currently sees and decides, for the live preview. */
@@ -226,25 +328,38 @@ data class EngineDebug(
     val cursorU: Float = 0.5f,
     val cursorV: Float = 0.5f,
     val gain: Float = 1f,
-    val pinch: Float = 0f,
-    val pinchEnter: Float = 0f,
-    val pinchExit: Float = 0f,
-    /** The hand is in a pose from which a pinch would start (upright, index extended). */
-    val pinchReady: Boolean = false,
+    /** Thumb–index gap over palm size, and the thresholds. */
+    val gap: Float = 0f,
+    val tapEnter: Float = 0f,
+    val tapExit: Float = 0f,
     /** IDLE / PENDING / DRAGGING. */
     val touch: String = "IDLE",
-    val tiltDeg: Float = 0f,
-    val upright: Boolean = false,
-    /** Index-finger reach (≈2 extended, ≈1 curled) and the recent maximum it is compared with. */
-    val reach: Float = 0f,
-    val reachBaseline: Float = 0f,
-    val curlNeeded: Float = 0f,
-    val curlDepth: Float = 0f,
-    val clickState: String = "IDLE",
-    /** Time since the last click was detected (also while disarmed), [Long.MAX_VALUE] = never. */
+    /** Time since the last finger-tap click (also while disarmed), [Long.MAX_VALUE] = never. */
     val clickAgoMs: Long = Long.MAX_VALUE,
-    val blade: String = "-",
-    val swipeAxis: SwipeAxis? = null,
+    /** Confidence of the last tap/push candidate and its factors ([TapGate.FACTOR_NAMES], -1 = not used). */
+    val clickConfidence: Float = 0f,
+    val clickFactors: FloatArray = FloatArray(TapGate.FACTOR_NAMES.size),
+    /** Pointer confidence 0..1. */
+    val pointerConfidence: Float = 1f,
+    /** Palm angle away from the calibrated pose (degrees) and the tolerance. */
+    val angleDeg: Float = 0f,
+    val angleTolDeg: Float = 25f,
+    /** Air-plane proximity (1 = plane); whether the plane is calibrated (fixed to the camera). */
+    val push: Float = 0f,
+    val pushCalibrated: Boolean = false,
+    /** Open palm held still: a flick would be recognised. */
+    val flickReady: Boolean = false,
+    /** Palm speed in palm sizes per second. */
+    val palmSpeed: Float = 0f,
+    /** Attention score 0..1, or -1 without a calibration / face. */
+    val attention: Float = -1f,
+    /** Actions paused after a pose. */
+    val cooldown: Boolean = false,
+    /** Hand-safe region in user-view camera coordinates (0..1): left, top, right, bottom. */
+    val region: FloatArray = floatArrayOf(0f, 0f, 1f, 1f),
+    /** Region edges the palm is pressing on (bitmask, see [ControlEvent.Pointer.edge]). */
+    val edge: Int = 0,
+    val touchSource: TouchSource? = null,
     val bindLabel: String? = null,
     val bindProgress: Float = 0f,
     val bodyVisible: Boolean = false,

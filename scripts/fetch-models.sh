@@ -13,3 +13,4 @@ fetch() {
 }
 fetch "$base/gesture_recognizer/gesture_recognizer/float16/latest/gesture_recognizer.task" gesture_recognizer.task
 fetch "$base/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task" pose_landmarker_lite.task
+fetch "$base/face_landmarker/face_landmarker/float16/latest/face_landmarker.task" face_landmarker.task

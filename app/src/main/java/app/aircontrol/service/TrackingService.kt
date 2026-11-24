@@ -28,11 +28,15 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleService
 import androidx.lifecycle.lifecycleScope
 import app.aircontrol.R
+import app.aircontrol.gesture.AttentionCalibration
+import app.aircontrol.gesture.CalibrationKind
 import app.aircontrol.gesture.ControlEvent
 import app.aircontrol.gesture.DisarmReason
 import app.aircontrol.gesture.EngineConfig
 import app.aircontrol.gesture.FrameObservation
 import app.aircontrol.gesture.GestureEngine
+import app.aircontrol.gesture.P3
+import app.aircontrol.gesture.PushCalibration
 import app.aircontrol.settings.AppSettings
 import app.aircontrol.settings.SettingsRepository
 import app.aircontrol.settings.SourceType
@@ -61,6 +65,8 @@ class TrackingService : LifecycleService(), FrameSink, VisionPipeline.Listener {
         const val ACTION_START = "app.aircontrol.action.START"
         const val ACTION_STOP = "app.aircontrol.action.STOP"
         const val ACTION_TOGGLE_ARM = "app.aircontrol.action.TOGGLE_ARM"
+        const val ACTION_CALIBRATE = "app.aircontrol.action.CALIBRATE"
+        const val EXTRA_KIND = "kind"
         private const val CHANNEL = "tracking"
         private const val NOTIFICATION_ID = 1
         private const val IDLE_FPS = 12
@@ -73,6 +79,16 @@ class TrackingService : LifecycleService(), FrameSink, VisionPipeline.Listener {
         fun stop(context: Context) {
             if (ControlBus.state.value.running) {
                 context.startService(Intent(context, TrackingService::class.java).setAction(ACTION_STOP))
+            }
+        }
+
+        /** Runs calibrations one after the other (tracking must be running); the overlay guides the user. */
+        fun calibrate(context: Context, vararg kinds: CalibrationKind) {
+            if (ControlBus.state.value.running && kinds.isNotEmpty()) {
+                context.startService(
+                    Intent(context, TrackingService::class.java).setAction(ACTION_CALIBRATE)
+                        .putExtra(EXTRA_KIND, kinds.joinToString(",") { it.name })
+                )
             }
         }
 
@@ -123,6 +139,13 @@ class TrackingService : LifecycleService(), FrameSink, VisionPipeline.Listener {
             } else {
                 stopSelf()
             }
+            ACTION_CALIBRATE -> if (running) {
+                val kinds = intent.getStringExtra(EXTRA_KIND).orEmpty().split(",")
+                    .mapNotNull { k -> CalibrationKind.entries.firstOrNull { it.name == k } }
+                calQueue.clear()
+                calQueue.addAll(kinds)
+                startNextCalibration()
+            }
             else -> if (!running) begin()
         }
         return START_NOT_STICKY
@@ -154,6 +177,7 @@ class TrackingService : LifecycleService(), FrameSink, VisionPipeline.Listener {
             mirror = settings.mirror
             poseEnabled = settings.usePose
             swapHands = settings.swapHands
+            faceEnabled = settings.attentionGate && settings.attention != null
         }
         pipeline = p
         val accel = settings.accelerator
@@ -200,6 +224,7 @@ class TrackingService : LifecycleService(), FrameSink, VisionPipeline.Listener {
             mirror = s.mirror
             poseEnabled = s.usePose
             swapHands = s.swapHands
+            faceEnabled = s.attentionGate && s.attention != null
         }
         applyEngineConfig()
         if (s.sourceKey() != old.sourceKey() || s.source != old.source) {
@@ -248,6 +273,7 @@ class TrackingService : LifecycleService(), FrameSink, VisionPipeline.Listener {
             mirror = settings.mirror
             poseEnabled = settings.usePose
             swapHands = settings.swapHands
+            faceEnabled = settings.attentionGate && settings.attention != null
         }
         pipeline = p
         val accel = settings.accelerator
@@ -324,7 +350,7 @@ class TrackingService : LifecycleService(), FrameSink, VisionPipeline.Listener {
                     fps = fps,
                     inferenceMs = inferenceMs,
                     sign = dbg.sign,
-                    pinch = dbg.pinch,
+                    pinch = dbg.gap,
                     handVisible = obs.hands.isNotEmpty(),
                     bodyVisible = engine.bodyVisible,
                     sourceError = false,
@@ -345,11 +371,46 @@ class TrackingService : LifecycleService(), FrameSink, VisionPipeline.Listener {
         val changed = when (e) {
             ControlEvent.Armed -> { armed = true; true }
             is ControlEvent.Disarmed -> { armed = false; true }
+            is ControlEvent.Calibration -> {
+                if (e.done) onCalibrated(e)
+                false
+            }
             else -> false
         }
         if (changed) {
             ControlBus.state.update { it.copy(armed = armed) }
             main.post { updateNotification() }
+        }
+    }
+
+    /** Calibrations still to run (a "calibrate everything" sequence). Touched on the main thread only. */
+    private val calQueue = ArrayDeque<CalibrationKind>()
+
+    private fun startNextCalibration() {
+        val kind = calQueue.removeFirstOrNull() ?: return
+        pipeline?.faceAlways = kind == CalibrationKind.ATTENTION
+        engineThread.execute { engine.startCalibration(kind) }
+    }
+
+    private fun onCalibrated(e: ControlEvent.Calibration) {
+        main.post {
+            pipeline?.faceAlways = false
+            val r = e.result
+            if (r != null) {
+                lifecycleScope.launch {
+                    repo.update {
+                        when (e.kind) {
+                            CalibrationKind.HAND -> it.copy(handReference = P3(r[0], r[1], r[2]))
+                            CalibrationKind.PUSH -> it.copy(pushCalibration = PushCalibration.fromResult(r))
+                            CalibrationKind.ATTENTION -> it.copy(attention = AttentionCalibration(r[0], r[1], r[2]))
+                        }
+                    }
+                }
+                // Next step after a short pause, so the "calibrated" message can be read.
+                main.postDelayed({ startNextCalibration() }, 1200)
+            } else {
+                calQueue.clear()
+            }
         }
     }
 

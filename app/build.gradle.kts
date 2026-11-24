@@ -20,8 +20,8 @@ android {
         applicationId = "app.aircontrol"
         minSdk = 29
         targetSdk = 36
-        versionCode = 3
-        versionName = "2.1.0"
+        versionCode = 5
+        versionName = "2.3.0"
         // Pixel 8 and current Galaxy Tabs are 64-bit ARM; keeps the APK small.
         ndk { abiFilters += "arm64-v8a" }
     }
@@ -65,6 +65,11 @@ android {
 
     testOptions {
         unitTests.isReturnDefaultValues = true
+        unitTests.all {
+            // Clip replay report and per-clip filter: -Pclips=click_center (substring).
+            it.systemProperty("clips.filter", project.findProperty("clips") ?: "")
+            it.testLogging.showStandardStreams = project.hasProperty("clips")
+        }
     }
 }
 
@@ -92,4 +97,6 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
 
     testImplementation(libs.junit)
+    // Real org.json for reading recorded clips (Android's copy is stubbed in unit tests).
+    testImplementation(libs.org.json)
 }

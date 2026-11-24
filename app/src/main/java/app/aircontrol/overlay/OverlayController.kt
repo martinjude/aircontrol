@@ -46,7 +46,7 @@ class OverlayController(private val service: AccessibilityService) {
             is ControlEvent.Pointer -> e.visible
             is ControlEvent.ArmProgress -> e.progress > 0f
             is ControlEvent.BindProgress -> e.progress > 0f
-            is ControlEvent.SwipeMode -> e.axis != null || e.progress > 0f
+            is ControlEvent.Calibration -> true
             is ControlEvent.TouchMove, is ControlEvent.ClickRejected -> false
             else -> true
         }

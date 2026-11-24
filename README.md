@@ -5,15 +5,29 @@ the front/back camera or a network (IP) camera. Everything runs on the device.
 
 - **🤟 hold 1 s** turns gesture mode on. A glowing border around the screen shows that AirControl is
   in control. Hold 🤟 again to turn it off; it also turns off after 20 s without a hand.
-- **The cursor sits on the centre of your palm.** The camera view maps directly onto the screen: the
-  middle of the view is the middle of the screen and the corners of the view are the corners of the
-  screen (Settings → *Cursor speed* raises the gain if you can't reach the edges).
-- **Click = curl and release your index finger** (bend it and straighten it again, quickly). The click
-  fires on the release, where the cursor was.
-- **Pinch 🤏 with your hand upright** (fingers up, thumb and index facing the camera): quick pinch = tap ·
-  pinch, move, release = drag/scroll · pinch and hold = long press. A horizontal hand does not pinch.
-- **Flat hand held 0.3 s** arms swipes ("Swipe armed"): palm sideways = left/right strokes, palm
-  down = up/down strokes. Stays armed while the hand stays flat.
+- **The cursor follows the centre of your palm** inside a *hand-safe frame*: the part of the camera
+  view where the palm can be while the whole hand (raised fingers included) stays in view. That frame
+  spans the screen, so the corners are reachable without the index leaving the camera. It scales with
+  your hand size, i.e. your distance (Settings → *Cursor speed* shrinks it further).
+- **Click and hold, two ways** (Settings → *Click and hold*, default both):
+  - **Finger tap 👌**: touch thumb and index tips quickly → click where the cursor was. Keep them
+    together → finger on the screen: move to drag/scroll, stay still for a long press.
+  - **Air push 👉**: push your hand toward the screen through an invisible plane parallel to the
+    camera. A soft glow under the cursor grows as you get close; pushing through touches, pulling
+    back releases. While pushed in the cursor moves slowly (0.35×) for precise drags. *Calibration →
+    Air plane* measures the plane at 5 screen points so it is fixed to the camera.
+  - Every tap or push is scored (palm angle, steady hand, other fingers still, a quick deliberate
+    touch, gaze) against the **strictness**; the event log says why one was rejected.
+  - **Pause after a pose**: for 600 ms after a bind pose, a fist or 🤟, nothing clicks, pushes or
+    swipes, so going back to pointing is safe.
+- **Hand angle**: keep the palm facing the screen (*Calibration → Hand angle* records your comfortable
+  angle). When it turns away the screen edges and the cursor turn orange, then red, and confidence
+  drops; far off, clicks are blocked.
+- **Pointer confidence**: a full ring is trusted; a thin arc shows the confidence when it drops (palm
+  angle, shaky tracking, frame edge, gaze). A green dot above the ring means your eyes are on the
+  screen (after the gaze calibration; *Only click when I look at the screen* can also block clicks).
+- **Swipe = open palm held still, then flicked** left/right/up/down. Distances are in palm sizes, a
+  flick that leaves the frame still counts, and the return stroke is ignored.
 - **Binds** (Binds tab): hold a hand pose to trigger an action. One hand or two hands together,
   optionally only the left or right hand. Poses: ✊ 👍 👎 ✌️ 🖐 plus 🤙 (thumb + pinky), 3️⃣ and 4️⃣ fingers.
   Actions: Back, Home, Recents, Notifications, Quick settings, Lock screen, Screenshot, Power menu,
@@ -33,7 +47,7 @@ was tested on a Pixel 8 and a Pixel 8-class emulator running Android 17.
    ```sh
    export PATH=/opt/homebrew/share/android-commandlinetools/platform-tools:$PATH
    adb devices                                  # accept the prompt on the device
-   adb install -r dist/AirControl-2.1.0.apk
+   adb install -r dist/AirControl-2.3.0.apk
    ```
    For Wireless debugging use `adb pair <ip>:<pair-port>` then `adb connect <ip>:<port>`.
 
@@ -57,11 +71,12 @@ Open the file and allow your file manager to install unknown apps.
    *Arm now / Disarm* and *Stop* buttons.
 4. Face the camera at 0.5–2 m with head and shoulders in frame, then hold 🤟 for a second.
 
-**Camera → Live tracking** shows what the model sees: the skeleton, the cursor point (palm centre), the
-camera region that spans the screen, meters for pinch and click with their thresholds, an index-reach
-graph and an event log. **Settings → Look → Live tracking preview** shows the same in a panel in a screen
-corner on top of any app (it hops to the other corner when the cursor goes under it). It also works
-while gesture control is off, so you can tune clicks and pinches without touching anything.
+**Tracking view** (Settings → Look): *Compact* (default) shows, while control is on, a small view of
+your hand in a screen corner with the hand-safe frame (an edge lights up when your palm reaches it),
+the air-push depth gauge and one status word. *Diagnostics* adds meters with thresholds for pointer
+confidence, palm angle, the thumb–index gap and the tap confidence factors, push and flick speed, a
+gap-over-time graph and an event log that says why each tap or push was rejected; it also works while control is off. **Camera → Live tracking**
+draws the same view inside the app.
 
 ## Network / IP camera
 Camera tab → *Network* → enter the stream URL (same Wi‑Fi):
@@ -79,17 +94,20 @@ MJPEG has the lowest latency. RTSP works too but usually lags more. Credentials 
 the image is sideways.
 
 ## Settings worth knowing
-- **Cursor speed**: camera → screen gain around the centre (1.00× = view edges are screen edges).
-  **Smoothing**: jitter vs lag.
-- **Click sensitivity**: higher = a smaller finger flick counts; lower it if clicks fire by accident. The
-  *click* meter shows the dip of the index-finger reach and the dip that is needed (tick); a rejected
-  curl is explained in the event log ("too shallow 0.18/0.30", "too slow", "hand moving").
-- **Pinch tilt tolerance**: how far from upright the hand may be to start a pinch.
-- **Stroke sensitivity**: how short/slow a stroke can be once swipe mode is armed.
-- Every slider shows a *reset* button when it differs from its default.
-- **Swap left / right hand**: flips the detected hand if left/right binds fire for the wrong hand.
-- **Require a person in view**: ignores hands unless shoulders are visible.
-- **Processor**: Auto tries the GPU, then falls back to the CPU. Force CPU if tracking misbehaves.
+- **Calibration**: *Calibrate everything* runs hand angle → air plane (5 points) → gaze; each can
+  also be run alone or cleared.
+- **Pointer**: cursor speed (gain of the hand-safe frame), smoothing, hand angle tolerance.
+- **Click and hold**: method (finger tap / air push / both), strictness, click length (shorter touch
+  = click, longer = hold), pause after a pose, *only click when I look at the screen*.
+- **Air push**: drag speed while pushed in; push depth for the uncalibrated floating plane.
+- **Swipes**: on/off, flick sensitivity, swipe length.
+- **Detection**: auto-off, require a person in view, upper-body tracking, swap left/right, processor.
+- Every slider shows a reset button when it differs from its default.
+
+## Gesture test clips
+Record short videos of real gestures, extract their landmarks once on the Mac, and every engine change
+is checked against them (`ClipReplayTest`): see [testdata/README.md](testdata/README.md) for the list
+of videos, the naming rules (the file name says what must happen) and the commands.
 
 ## Build from source
 Requirements (already installed on this Mac): JDK 17 (`brew install openjdk@17`) and the Android
@@ -99,7 +117,7 @@ command-line tools (`brew install --cask android-commandlinetools`, SDK at
 ```sh
 ./scripts/fetch-models.sh       # downloads the MediaPipe models into app/src/main/assets (not in git)
 ./scripts/build-apk.sh          # downloads models, creates a release key on first run, builds dist/AirControl-<version>.apk
-./gradlew testDebugUnitTest     # gesture-engine unit tests (JVM, no device needed)
+./gradlew testDebugUnitTest     # gesture-engine unit tests + recorded clip replay (JVM, no device needed)
 ./gradlew assembleDebug         # debug build
 ```
 
@@ -108,8 +126,8 @@ signed with the same key, otherwise Android refuses to install over the existing
 
 ## How it works
 ```
-camera / MJPEG / RTSP ──► VisionPipeline (MediaPipe GestureRecognizer + PoseLandmarker, on-device)
-        (TrackingService, foreground)         │ hand landmarks + sign + shoulders, user-view coords
+camera / MJPEG / RTSP ──► VisionPipeline (MediaPipe GestureRecognizer + PoseLandmarker + FaceLandmarker, on-device)
+        (TrackingService, foreground)         │ hand landmarks + sign + shoulders + gaze, user-view coords
                                               ▼
                                    GestureEngine (pure Kotlin, unit-tested)
                                               │ Armed / Pointer / Tap / TouchDown·Move·Up / Swipe / BindFired
@@ -120,28 +138,36 @@ camera / MJPEG / RTSP ──► VisionPipeline (MediaPipe GestureRecognizer + Po
 
 | Path | What |
 |---|---|
-| `app/src/main/java/app/aircontrol/gesture/` | Engine, click detector, bind model + matcher, pose classifier, One-Euro filter, hand features |
+| `app/src/main/java/app/aircontrol/gesture/` | Engine, tap gate (click confidence), push plane, flick detector, attention, hand-safe pointer map, binds, pose classifier, One-Euro filter, hand features |
 | `app/src/main/java/app/aircontrol/vision/` | MediaPipe pipeline (GPU→CPU fallback, one frame in flight) |
 | `app/src/main/java/app/aircontrol/source/` | CameraX, MJPEG and RTSP frame sources |
 | `app/src/main/java/app/aircontrol/service/` | Foreground tracking service, accessibility service, gesture dispatcher |
-| `app/src/main/java/app/aircontrol/overlay/` | Glow border / pointer overlay (`TYPE_ACCESSIBILITY_OVERLAY`) |
+| `app/src/main/java/app/aircontrol/overlay/` | Overlay (`TYPE_ACCESSIBILITY_OVERLAY`): glow, angle warning shade, pointer states, calibration targets, tracking view (`TrackingRenderer`, shared with the app) |
 | `app/src/main/java/app/aircontrol/ui/` | Compose app (Control, Camera, Binds, Settings, Help) |
-| `app/src/test/` | Engine tests with synthetic hand landmarks |
+| `app/src/test/` | Engine tests with synthetic hand landmarks; replay of recorded clips (`resources/clips/`) |
+| `scripts/extract-clips.py`, `testdata/` | Gesture videos → landmark clips |
 
 Design notes:
 - The cursor is the mean of the wrist and the four knuckles (the palm centre), which does not move when
-  the fingers do, so a finger flick or a pinch never drags the cursor. It is mapped linearly from the
-  camera frame to the screen (`PointerMap`).
-- Click detection watches the index-finger reach (|wrist→tip| / |wrist→knuckle| from the MediaPipe world
-  landmarks, ≈2 straight, ≈1 curled). The finger must have been extended, dip by ≥ 0.30 within 0.45 s
-  and regain 60 % of the dip; slow curls (making a fist), shallow ones and curls with a moving hand are
-  rejected. The click lands where the cursor was just before the curl started.
-- Pinch uses hysteresis (closes below 0.30 × palm size, opens above 0.45), rejects fists, and only starts
-  with the hand upright (wrist→knuckle axis within 45° of vertical).
-- Swipe mode is armed by a still, flat hand whose palm normal (from MediaPipe world landmarks)
-  points sideways (left/right strokes) or up/down (up/down strokes). A stroke needs ≥ 0.45 shoulder
-  widths in 220 ms along the armed axis; the opposite direction is blocked for 0.9 s so the return
-  stroke is ignored.
+  the fingers do, so a finger tap never drags the cursor. It is mapped from the hand-safe
+  region (margins of 1.7 palm sizes above, 0.7 below, 0.65 at the sides) onto the screen (`PointerMap`).
+- Finger tap: thumb–index tip distance over palm size, with hysteresis (touching below 0.30, apart
+  above 0.45). At the moment of contact `TapGate` checks hard gates (pause after a pose, palm angle
+  beyond tolerance + 25°, gaze gate) and scores factors (angle, steadiness before, isolation of the
+  other fingers, closing speed, gaze) into a weighted geometric mean that must reach the strictness
+  threshold. A touch released within 300 ms is a click at the pointer position from 80 ms before
+  contact; longer or moved beyond the slop it becomes TouchDown/Move/Up.
+- Hand angle: palm normal from the world landmarks in a canonical form (z ≥ 0, |x|) so it does not
+  depend on the hand or on palm vs back; compared with the calibrated reference.
+- Air push: depth = ln(rigid palm-bone scale). Calibrated: hover and plane depths measured at 5 screen
+  points, interpolated by inverse-distance weighting at the cursor, proximity = (d − hover) /
+  (plane − hover), fixed to the camera. Uncalibrated: a floating plane 0.12 in front of a rest depth
+  that follows the hand with a 1.5 s time constant. One-frame jumps are treated as glitches.
+- Pointer confidence: weighted geometric mean of the angle score, steadiness (second difference of the
+  palm position), frame edge and gaze.
+- Swipes: an open palm (4 fingers extended) slower than 0.8 palm sizes/s for 120 ms is "ready"; within
+  350 ms of moving it must travel 2 palm sizes along one axis with a peak speed of 6 palm sizes/s. The
+  opposite direction is blocked for 0.7 s.
 - Binds are matched per frame against every visible hand; two-hand binds beat side-specific ones, which
   beat plain ones. The pointer freezes while a hold builds up. 🤙, 3️⃣ and 4️⃣ are classified from finger
   extension flags, the others come from MediaPipe's gesture recognizer.

@@ -6,6 +6,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
@@ -62,15 +63,14 @@ fun BindsScreen(settings: AppSettings, repo: SettingsRepository) {
     var editing by remember { mutableStateOf<Bind?>(null) }
     var creating by remember { mutableStateOf(false) }
 
-    Text("Binds", fontSize = 26.sp, fontWeight = FontWeight.Bold)
-    Muted(
-        "Hold a hand pose for a moment to trigger an action while gesture control is on. " +
-            "One hand, or two hands together; optionally only the left or the right hand. " +
-            "🤟 is reserved for turning control on and off, and ☝️ moves the cursor."
+    PageTitle(
+        "Binds",
+        "Hold a hand pose for a moment to trigger an action while gesture control is on: one hand or two together, " +
+            "optionally only the left or the right. 🤟 turns control on and off, so it can't be bound.",
     )
 
     val duplicates = settings.binds.filter { it.enabled }.groupBy { it.triggerKey }.filterValues { it.size > 1 }.keys
-    if (settings.binds.isEmpty()) Muted("No binds yet.")
+    if (settings.binds.isEmpty()) Muted("No binds yet")
     settings.binds.forEach { b ->
         BindCard(
             b,
@@ -79,15 +79,20 @@ fun BindsScreen(settings: AppSettings, repo: SettingsRepository) {
             onEdit = { editing = b },
         )
     }
-    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        Button(onClick = { creating = true }) { Text("Add bind") }
-        OutlinedButton(onClick = { update { it.copy(binds = Binds.defaults()) } }) { Text("Reset to defaults") }
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Button(onClick = { creating = true }) {
+            AirIcon(AirIcons.Plus, AirColors.OnAccent, 18.dp)
+            Spacer(Modifier.width(8.dp))
+            Text("Add bind")
+        }
+        OutlinedButton(onClick = { update { it.copy(binds = Binds.defaults()) } }) { Text("Reset to defaults", color = AirColors.Text) }
     }
     SectionCard("Tips") {
-        Muted("• Two-hand binds need both poses held at the same time. A one-hand bind with the same pose as one of them may fire first if you raise your hands one after the other.")
-        Muted("• 🤙, 3️⃣ and 4️⃣ are recognised from finger positions, not by MediaPipe: they are newer, so hold them steady; they may need tuning on your hand. 4️⃣ means four fingers up with the thumb tucked; 🖐 is the open palm with the thumb out.")
-        Muted("• Left / right is the hand as you see it from your side. If it comes out swapped, flip it in Settings → Tracking.")
-        Muted("• \"Open an app\" needs the accessibility service to be on; the target app opens over whatever is showing.")
+        Muted("Two-hand binds need both poses at the same time. A one-hand bind with one of the same poses may fire first if you raise your hands one after the other.")
+        Muted("🤙, 3️⃣ and 4️⃣ are read from finger positions rather than by the gesture model: hold them steady. 4️⃣ means the thumb tucked; 🖐 has the thumb out.")
+        Muted("After any bound pose, taps, pushes and swipes pause for a moment (Settings, Click and hold) so going back to pointing never clicks.")
+        Muted("Left and right are as seen from your side. If they come out swapped, flip them in Settings, Tracking.")
+        Muted("Open an app needs the accessibility service on; the app opens over whatever is showing.")
     }
 
     if (creating || editing != null) {
@@ -113,12 +118,28 @@ fun BindsScreen(settings: AppSettings, repo: SettingsRepository) {
 private fun BindCard(b: Bind, duplicate: Boolean, onToggle: (Boolean) -> Unit, onEdit: () -> Unit) {
     SectionCard(modifier = Modifier.clickable(onClick = onEdit)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text("${b.triggerLabel}  →  ${b.actionLabel}", fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
+            TriggerGlyphs(b)
+            Spacer(Modifier.width(16.dp))
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(b.actionLabel, style = AirType.BodyStrong, color = if (b.enabled) AirColors.Text else AirColors.Muted)
                 Muted(describeBind(b))
-                if (duplicate) Text("Same gesture as another bind: only one of them will fire.", color = AirColors.Warn, fontSize = 13.sp)
+                if (duplicate) Text("Same gesture as another bind: only one will fire", style = AirType.Caption, color = AirColors.Warn)
             }
+            Spacer(Modifier.width(8.dp))
             Switch(checked = b.enabled, onCheckedChange = onToggle)
+        }
+    }
+}
+
+/** The bind's pose(s) as emoji, with L / R under a side-specific hand. */
+@Composable
+internal fun TriggerGlyphs(b: Bind) {
+    Row(horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
+        listOfNotNull(b.first, b.second).forEach { spec ->
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Emoji(spec.pose.emoji, 28.dp)
+                if (spec.side != HandSide.ANY) Text(if (spec.side == HandSide.LEFT) "L" else "R", style = AirType.Caption, color = AirColors.Text2)
+            }
         }
     }
 }
@@ -179,34 +200,40 @@ private fun BindEditor(initial: Bind?, onDismiss: () -> Unit, onSave: (Bind) -> 
                         SegmentedButton(selected = two == v, onClick = { two = v }, shape = SegmentedButtonDefaults.itemShape(i, 2)) { Text(label) }
                     }
                 }
-                Text(if (two) "First hand" else "Hand", fontWeight = FontWeight.SemiBold)
-                DropdownRow("Pose", p1, Pose.entries, { "${it.emoji} ${it.label}" }) { p1 = it }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(if (two) "First hand" else "Hand", style = AirType.BodyStrong, modifier = Modifier.weight(1f))
+                    Emoji(p1.emoji, 24.dp)
+                }
+                DropdownRow("Pose", p1, Pose.entries, { "${it.emoji}  ${it.label}" }) { p1 = it }
                 DropdownRow("Which", s1, HandSide.entries, ::sideLabel) { s1 = it }
                 if (two) {
-                    Text("Second hand", fontWeight = FontWeight.SemiBold)
-                    DropdownRow("Pose", p2, Pose.entries, { "${it.emoji} ${it.label}" }) { p2 = it }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Second hand", style = AirType.BodyStrong, modifier = Modifier.weight(1f))
+                        Emoji(p2.emoji, 24.dp)
+                    }
+                    DropdownRow("Pose", p2, Pose.entries, { "${it.emoji}  ${it.label}" }) { p2 = it }
                     DropdownRow("Which", s2, HandSide.entries, ::sideLabel) { s2 = it }
                 }
                 DropdownRow("Action", action, SystemAction.entries.filter { it != SystemAction.NONE }, { it.label }) { action = it }
                 if (action == SystemAction.LAUNCH_APP) {
-                    OutlinedButton(onClick = { picking = true }, Modifier.fillMaxWidth()) { Text(appLabel ?: "Choose an app…") }
+                    OutlinedButton(onClick = { picking = true }, Modifier.fillMaxWidth()) { Text(appLabel ?: "Choose an app", color = AirColors.Text) }
                 }
                 SettingSlider("Hold time", holdSec, 0.3f..2f, 16, { "%.1f s".format(it) }) { holdOverride = it }
-                countdown?.let { Text(it, color = AirColors.Coral, fontWeight = FontWeight.SemiBold) }
+                countdown?.let { Text(it, style = AirType.BodyStrong, color = AirColors.Coral) }
                 OutlinedButton(
                     enabled = valid && countdown == null,
                     onClick = {
                         val b = build()
                         scope.launch {
                             for (i in 3 downTo 1) {
-                                countdown = "Testing in $i…"
+                                countdown = "Testing in $i s"
                                 delay(1000)
                             }
                             countdown = null
                             ControlBus.events.tryEmit(ControlEvent.BindFired(b.action, b.appPackage, b.actionLabel))
                         }
                     },
-                ) { Text("Test the action in 3 s") }
+                ) { Text("Test the action in 3 s", color = AirColors.Text) }
             }
         },
         confirmButton = { TextButton(enabled = valid, onClick = { onSave(build()) }) { Text("Save") } },
@@ -252,14 +279,14 @@ private fun AppPicker(onDismiss: () -> Unit, onPick: (AppEntry) -> Unit) {
                 OutlinedTextField(value = query, onValueChange = { query = it }, label = { Text("Search") }, singleLine = true, modifier = Modifier.fillMaxWidth())
                 val list = apps
                 if (list == null) {
-                    Muted("Loading…")
+                    Muted("Loading apps")
                 } else {
                     LazyColumn(Modifier.heightIn(max = 360.dp)) {
                         items(list.filter { it.label.contains(query, ignoreCase = true) }, key = { it.pkg }) { a ->
                             Text(
                                 a.label,
                                 Modifier.fillMaxWidth().clickable { onPick(a) }.padding(vertical = 12.dp, horizontal = 4.dp),
-                                fontSize = 16.sp,
+                                style = AirType.Body,
                             )
                         }
                     }

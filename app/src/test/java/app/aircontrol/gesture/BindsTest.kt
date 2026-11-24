@@ -142,15 +142,14 @@ class BindsTest {
     // ------------------------------------------------------------ hand geometry
 
     @Test
-    fun uprightHandHasNoTiltAndHorizontalHandIs90() {
-        fun feat(roll: Float) = hand(0.66f, 0.5f, Shape.PINCH, rollDeg = roll).let { HandFeatures.from(it, SyntheticHands.ASPECT) }
-        assertEquals(0f, feat(0f).tiltDeg, 1f)
-        assertEquals(30f, feat(30f).tiltDeg, 1f)
-        assertEquals(90f, feat(90f).tiltDeg, 1f)
-        assertEquals(90f, feat(-90f).tiltDeg, 1f)
-        assertTrue(feat(0f).upright(45f, 0.5f))
-        assertFalse(feat(60f).upright(45f, 0.5f))
-        assertFalse(feat(90f).upright(45f, 0.5f))
+    fun palmAngleIgnoresInPlaneRotationButNotTurning() {
+        fun feat(roll: Float = 0f, yaw: Float = 0f) =
+            hand(0.66f, 0.5f, Shape.OPEN, rollDeg = roll, yawDeg = yaw).let { HandFeatures.from(it, SyntheticHands.ASPECT) }
+        assertEquals(0f, feat().angleTo(null), 1f)
+        // A hand rolled sideways still faces the camera.
+        assertEquals(0f, feat(roll = 90f).angleTo(null), 1f)
+        assertEquals(40f, feat(yaw = 40f).angleTo(null), 2f)
+        assertEquals(80f, feat(yaw = 80f).angleTo(null), 2f)
     }
 
     @Test

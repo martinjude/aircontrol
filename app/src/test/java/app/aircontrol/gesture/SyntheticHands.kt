@@ -14,16 +14,18 @@ object SyntheticHands {
      * BLADE_V: flat hand, fingers up, palm facing sideways. BLADE_H: flat hand, fingers pointing
      * sideways, palm facing the floor. Both are seen almost edge-on by the camera.
      * SHAKA: thumb and pinky out. THREE: index, middle, ring up, thumb tucked. FOUR: four fingers up,
-     * thumb tucked.
+     * thumb tucked. PINCH: thumb and index tips together, other fingers up; POINT_PINCH: the same with
+     * the other fingers folded (a pointing hand tapping thumb and index).
      */
-    enum class Shape { OPEN, PINCH, FIST, POINT, BLADE_V, BLADE_H, SHAKA, THREE, FOUR }
+    enum class Shape { OPEN, PINCH, POINT_PINCH, FIST, POINT, BLADE_V, BLADE_H, SHAKA, THREE, FOUR }
 
     /**
      * @param cx,cy palm-centre position (the cursor reference) in aspect-corrected space (cx in 0..ASPECT, cy in 0..1)
      * @param s palm size (wrist to middle knuckle)
      * @param pinchRatio thumb-index tip distance / s, used by [Shape.PINCH]
-     * @param indexCurl 0 = index straight, 1 = fully curled; used by [Shape.POINT]
+     * @param indexCurl 0 = index straight, 1 = fully curled; used by [Shape.POINT] and [Shape.OPEN]
      * @param rollDeg in-plane rotation of the whole hand about the palm centre: 0 = fingers up, 90 = fingers sideways
+     * @param yawDeg rotation about the vertical axis: 0 = palm facing the camera, 90 = edge-on
      */
     fun hand(
         cx: Float,
@@ -36,6 +38,7 @@ object SyntheticHands {
         indexCurl: Float = 0f,
         rollDeg: Float = 0f,
         side: HandSide = HandSide.ANY,
+        yawDeg: Float = 0f,
     ): HandObservation {
         // The authored geometry has its palm centre (mean of wrist + 4 knuckles) at (ox + 0.1 s, oy - 0.25 s).
         val ox = cx - 0.1f * s
@@ -74,24 +77,28 @@ object SyntheticHands {
         // Thumb base.
         p[1] = wrist + P3(-0.35f * s, -0.15f * s)
         p[2] = wrist + P3(-0.6f * s, -0.35f * s)
+        fun curlIndex() {
+            // The index curls about its knuckle: blend the extended and curled joint positions.
+            val b = mcps.getValue(5)
+            val k = indexCurl.coerceIn(0f, 1f)
+            p[6] = b + P3(0f, (-0.4f + 0.1f * k) * s)
+            p[7] = b + P3(0f, (-0.65f + 0.5f * k) * s)
+            p[8] = b + P3(0f, (-0.85f + 0.9f * k) * s)
+        }
         when (shape) {
             Shape.OPEN, Shape.BLADE_V, Shape.BLADE_H -> {
                 listOf(5, 9, 13, 17).forEach(::extended)
                 thumbOut()
+                if (indexCurl > 0f) curlIndex()
             }
             Shape.POINT -> {
                 extended(5); curled(9); curled(13); curled(17)
-                // The index curls about its knuckle: blend the extended and curled joint positions.
-                val b = mcps.getValue(5)
-                val k = indexCurl.coerceIn(0f, 1f)
-                p[6] = b + P3(0f, (-0.4f + 0.1f * k) * s)
-                p[7] = b + P3(0f, (-0.65f + 0.5f * k) * s)
-                p[8] = b + P3(0f, (-0.85f + 0.9f * k) * s)
+                curlIndex()
                 p[3] = wrist + P3(-0.5f * s, -0.6f * s)
                 p[4] = wrist + P3(-0.3f * s, -0.75f * s)
             }
-            Shape.PINCH -> {
-                listOf(9, 13, 17).forEach(::extended)
+            Shape.PINCH, Shape.POINT_PINCH -> {
+                if (shape == Shape.PINCH) listOf(9, 13, 17).forEach(::extended) else listOf(9, 13, 17).forEach(::curled)
                 val m = mcps.getValue(5)
                 p[5] = m
                 p[6] = m + P3(0f, -0.35f * s)
@@ -126,6 +133,7 @@ object SyntheticHands {
             Shape.BLADE_H -> p.map { c + rotX(rotZ(it - c, 90f), BLADE_DEG) }
             else -> p.toList()
         }.let { list -> if (rollDeg == 0f) list else list.map { c + rotZ(it - c, rollDeg) } }
+            .let { list -> if (yawDeg == 0f) list else list.map { c + rotY(it - c, yawDeg) } }
         return HandObservation(
             pts.map { P3(it.x / ASPECT, it.y, it.z / ASPECT) }, gesture, score,
             world = pts.map { (it - c) * 0.8f },
@@ -167,10 +175,12 @@ class EngineHarness(config: EngineConfig = EngineConfig(screenW = 1000, screenH 
     var t = 0L
         private set
     private val frameMs = 33L
+    /** Face seen in every frame (attention tests). */
+    var face: FaceObservation? = null
 
     fun frame(hands: List<HandObservation>, pose: PoseObservation? = null) {
         t += frameMs
-        engine.process(FrameObservation(t, SyntheticHands.ASPECT, hands, pose))
+        engine.process(FrameObservation(t, SyntheticHands.ASPECT, hands, pose, face))
     }
 
     /** Feeds frames for [durationMs] produced by [hand] (given elapsed ms within this segment). */
@@ -190,8 +200,8 @@ class EngineHarness(config: EngineConfig = EngineConfig(screenW = 1000, screenH 
 
     fun arm() {
         hold(1100) { SyntheticHands.hand(0.66f, 0.5f, gesture = Signs.I_LOVE_YOU) }
-        // Release the sign so it can later be used to disarm.
-        hold(300) { SyntheticHands.hand(0.66f, 0.5f, SyntheticHands.Shape.POINT) }
+        // Release the sign (so it can later disarm) and let the pause after a pose run out.
+        hold(700) { SyntheticHands.hand(0.66f, 0.5f, SyntheticHands.Shape.POINT) }
         check(engine.armed) { "engine failed to arm" }
         events.clear()
     }

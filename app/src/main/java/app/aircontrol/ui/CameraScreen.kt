@@ -46,6 +46,9 @@ import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -57,7 +60,12 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import android.graphics.RectF
+import app.aircontrol.gesture.TapGate
+import app.aircontrol.gesture.ClickMethod
 import app.aircontrol.gesture.ControlEvent
+import app.aircontrol.gesture.TouchSource
+import app.aircontrol.overlay.TrackingRenderer
 import app.aircontrol.gesture.EngineDebug
 import app.aircontrol.gesture.HandLm
 import app.aircontrol.gesture.HandSide
@@ -75,32 +83,25 @@ fun CameraScreen(settings: AppSettings, repo: SettingsRepository) {
     val scope = rememberCoroutineScope()
     fun update(t: (AppSettings) -> AppSettings) = scope.launch { repo.update(t) }
 
-    Text("Camera", fontSize = 26.sp, fontWeight = FontWeight.Bold)
+    PageTitle("Camera")
 
     SectionCard("Source") {
-        val sources = listOf(SourceType.FRONT to "Front", SourceType.BACK to "Back", SourceType.NETWORK to "Network")
-        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-            sources.forEachIndexed { i, (type, label) ->
-                SegmentedButton(
-                    selected = settings.source == type,
-                    onClick = { update { it.copy(source = type) } },
-                    shape = SegmentedButtonDefaults.itemShape(i, sources.size),
-                ) { Text(label) }
-            }
+        Segmented(settings.source, listOf(SourceType.FRONT to "Front", SourceType.BACK to "Back", SourceType.NETWORK to "Network")) { v ->
+            update { it.copy(source = v) }
         }
         when (settings.source) {
             SourceType.FRONT -> Muted("Recommended: the selfie camera faces you while you look at the screen.")
-            SourceType.BACK -> Muted("Use when the device's back faces you (e.g. a tablet mounted on a stand).")
+            SourceType.BACK -> Muted("Use when the back of the device faces you, for example a tablet on a stand.")
             SourceType.NETWORK -> NetworkFields(settings) { t -> update(t) }
         }
         SwitchRow(
             "Mirror horizontally",
-            "On for any camera that faces you, so your right is the pointer's right.",
+            "On for any camera that faces you, so your right is the cursor's right.",
             settings.mirror,
         ) { v -> update { it.copy(mirror = v) } }
     }
 
-    LivePreview()
+    LivePreview(settings)
 }
 
 @Composable
@@ -121,19 +122,17 @@ private fun NetworkFields(settings: AppSettings, update: ((AppSettings) -> AppSe
         modifier = Modifier.fillMaxWidth(),
     )
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Muted("Same Wi‑Fi as this device.", Modifier.weight(1f))
+        Muted("Same Wi‑Fi as this device", Modifier.weight(1f))
         TextButton(enabled = url.trim() != settings.networkUrl, onClick = { update { it.copy(networkUrl = url.trim()) } }) {
             Text("Save URL")
         }
     }
-    Muted(
-        "MJPEG (lowest latency):\n" +
-            "• IP Webcam app: http://IP:8080/video\n" +
-            "• DroidCam: http://IP:4747/video\n" +
-            "• ESP32-CAM: http://IP:81/stream\n" +
-            "RTSP also works: rtsp://user:pass@IP:554/stream"
+    Muted("MJPEG has the lowest latency. RTSP also works.")
+    Text(
+        "IP Webcam   http://IP:8080/video\nDroidCam    http://IP:4747/video\nESP32-CAM   http://IP:81/stream\nRTSP        rtsp://user:pass@IP:554/stream",
+        style = AirType.Figure, color = AirColors.Text2,
     )
-    Text("Rotation", fontSize = 16.sp)
+    Text("Rotation", style = AirType.Body, color = AirColors.Text)
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         listOf(0, 90, 180, 270).forEach { r ->
             FilterChip(
@@ -149,10 +148,9 @@ private fun NetworkFields(settings: AppSettings, update: ((AppSettings) -> AppSe
 // ------------------------------------------------------------------ live tracking
 
 private const val SPARK_N = 90
-private const val SPARK_LO = 0.8f
-private const val SPARK_HI = 2.4f
-private const val PINCH_SCALE = 1.2f
-private const val CLICK_FLASH_MS = 400L
+private const val SPARK_LO = 0f
+private const val SPARK_HI = 1.2f
+private const val GAP_SCALE = 1.2f
 
 private class ReachHistory {
     val v = FloatArray(SPARK_N) { Float.NaN }
@@ -164,7 +162,7 @@ private class ReachHistory {
     fun push(d: EngineDebug) {
         if (d.t == lastT) return
         lastT = d.t
-        v[idx] = if (d.hands > 0) d.reach else Float.NaN
+        v[idx] = if (d.hands > 0) d.gap else Float.NaN
         val ct = if (d.clickAgoMs == Long.MAX_VALUE) Long.MIN_VALUE else d.t - d.clickAgoMs
         click[idx] = ct != Long.MIN_VALUE && ct != lastClick
         if (click[idx]) lastClick = ct
@@ -175,17 +173,18 @@ private class ReachHistory {
 private fun describeEvent(e: ControlEvent): String? = when (e) {
     ControlEvent.Armed -> "armed"
     is ControlEvent.Disarmed -> "disarmed"
-    is ControlEvent.Tap -> if (e.click) "click" else "pinch tap"
+    is ControlEvent.Tap -> if (e.click) "click" else "push tap"
     is ControlEvent.TouchDown -> "touch down"
     is ControlEvent.TouchUp -> "touch up"
     is ControlEvent.Swipe -> "swipe ${e.dir.name.lowercase()}"
     is ControlEvent.BindFired -> "bind: ${e.label}"
-    is ControlEvent.ClickRejected -> "click ✗ ${e.reason}"
+    is ControlEvent.ClickRejected -> "✗ ${e.reason}"
+    is ControlEvent.Calibration -> if (e.done) e.message.lowercase() else null
     else -> null
 }
 
 @Composable
-private fun LivePreview() {
+private fun LivePreview(settings: AppSettings) {
     val context = LocalContext.current
     val state by ControlBus.state.collectAsStateWithLifecycle()
     val log = remember { mutableStateListOf<String>() }
@@ -206,7 +205,7 @@ private fun LivePreview() {
         val frame by ControlBus.preview.collectAsStateWithLifecycle()
         val f = frame
         if (f == null) {
-            Muted(state.sourceStatus.ifEmpty { "Waiting for frames…" })
+            Muted(state.sourceStatus.ifEmpty { "Waiting for frames" })
             return@SectionCard
         }
         val d = f.snapshot.debug
@@ -216,143 +215,74 @@ private fun LivePreview() {
             hist.push(d)
             tick++
         }
+        val density = LocalDensity.current.density
+        val renderer = remember(density) { TrackingRenderer(density) }
+        val showPush = settings.clickMethod != ClickMethod.TAP
         val aspect = f.bitmap.width.toFloat() / f.bitmap.height.toFloat()
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .aspectRatio(aspect)
-                .clip(RoundedCornerShape(16.dp))
-                .background(Color.Black),
-        ) {
-            Image(
-                bitmap = f.bitmap.asImageBitmap(),
-                contentDescription = "Camera preview",
-                contentScale = ContentScale.FillBounds,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .graphicsLayer { scaleX = if (f.mirrored) -1f else 1f },
-            )
-            Canvas(Modifier.fillMaxSize()) {
-                val snap = f.snapshot
-                fun o(x: Float, y: Float) = Offset(x * size.width, y * size.height)
-                // The camera region that spans the whole screen.
-                val hs = PointerMap.halfSpan(d.gain)
-                drawRect(
-                    AirColors.Coral.copy(alpha = 0.7f),
-                    topLeft = o(0.5f - hs, 0.5f - hs),
-                    size = Size(size.width * 2 * hs, size.height * 2 * hs),
-                    style = Stroke(width = 3f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(14f, 10f))),
-                )
-                snap.pose?.let { pose ->
-                    for ((a, b) in PoseLm.UPPER_BODY) {
-                        if (pose.visibility[a] < 0.5f || pose.visibility[b] < 0.5f) continue
-                        drawLine(
-                            Color.White.copy(alpha = 0.6f),
-                            o(pose.landmarks[a].x, pose.landmarks[a].y),
-                            o(pose.landmarks[b].x, pose.landmarks[b].y),
-                            strokeWidth = 5f,
-                            cap = StrokeCap.Round,
-                        )
-                    }
-                }
-                for (hand in snap.hands) {
-                    for ((a, b) in HandLm.CONNECTIONS) {
-                        val color = when (b) {
-                            in 1..4 -> AirColors.Amber
-                            in 6..8 -> AirColors.Coral
-                            else -> Color.White
-                        }
-                        drawLine(
-                            color,
-                            o(hand.landmarks[a].x, hand.landmarks[a].y),
-                            o(hand.landmarks[b].x, hand.landmarks[b].y),
-                            strokeWidth = 5f,
-                            cap = StrokeCap.Round,
-                        )
-                    }
-                    hand.landmarks.forEach { drawCircle(Color.White, 4f, o(it.x, it.y)) }
-                }
-                if (d.hands > 0) {
-                    if (d.pinch < d.pinchEnter) {
-                        val hand = snap.hands.minBy {
-                            kotlin.math.abs(it.landmarks[HandLm.MIDDLE_MCP].x - d.palmU) + kotlin.math.abs(it.landmarks[HandLm.MIDDLE_MCP].y - d.palmV)
-                        }
-                        drawLine(
-                            if (d.pinchReady) AirColors.Ok else AirColors.Bad,
-                            o(hand.landmarks[HandLm.THUMB_TIP].x, hand.landmarks[HandLm.THUMB_TIP].y),
-                            o(hand.landmarks[HandLm.INDEX_TIP].x, hand.landmarks[HandLm.INDEX_TIP].y),
-                            strokeWidth = 8f,
-                            cap = StrokeCap.Round,
-                        )
-                    }
-                    // The cursor reference: the centre of the palm.
-                    val c = o(d.palmU, d.palmV)
-                    drawLine(Color.White.copy(alpha = 0.6f), Offset(c.x - 28f, c.y), Offset(c.x + 28f, c.y), strokeWidth = 3f)
-                    drawLine(Color.White.copy(alpha = 0.6f), Offset(c.x, c.y - 28f), Offset(c.x, c.y + 28f), strokeWidth = 3f)
-                    drawCircle(Color.White, 15f, c, style = Stroke(width = 4f))
-                    drawCircle(AirColors.Coral, 7f, c)
-                    if (d.clickAgoMs < CLICK_FLASH_MS) {
-                        val k = d.clickAgoMs / CLICK_FLASH_MS.toFloat()
-                        drawCircle(AirColors.Ok.copy(alpha = 1f - k), 16f + 44f * k, c, style = Stroke(width = 6f))
-                    }
-                }
-            }
+        val box = remember { RectF() }
+        Canvas(Modifier.fillMaxWidth().aspectRatio(aspect)) {
+            tick
+            box.set(0f, 0f, size.width, size.height)
+            drawIntoCanvas { renderer.drawCamera(it.nativeCanvas, box, 12.dp.toPx(), f.snapshot, f.bitmap, f.mirrored, showPush) }
+        }
+        val (status, color) = TrackingRenderer.status(d, showPush)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            StatusDot(if (state.armed) AirColors.Coral else AirColors.Muted)
+            Spacer(Modifier.width(8.dp))
+            Text(status, style = AirType.BodyStrong, color = Color(color), modifier = Modifier.weight(1f))
             Text(
-                if (state.armed) "ARMED" else "watching for 🤟",
-                color = Color.White,
-                fontSize = 13.sp,
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .padding(10.dp)
-                    .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(8.dp))
-                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                (if (d.hands == 0) "" else f.snapshot.hands.joinToString("+") {
+                    when (it.side) { HandSide.LEFT -> "L"; HandSide.RIGHT -> "R"; HandSide.ANY -> "?" }
+                } + "  ") + "%.0f fps".format(state.fps),
+                style = AirType.Figure, color = AirColors.Text2,
             )
         }
-        Row(Modifier.fillMaxWidth()) {
-            Column(Modifier.weight(1f)) {
-                Text("Pose", color = AirColors.Muted, fontSize = 13.sp)
-                Text(poseLabel(d), fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
-            }
-            Column(Modifier.weight(1f)) {
-                Text("Hands", color = AirColors.Muted, fontSize = 13.sp)
-                Text(
-                    if (d.hands == 0) "–" else f.snapshot.hands.joinToString(" + ") {
-                        when (it.side) { HandSide.LEFT -> "L"; HandSide.RIGHT -> "R"; HandSide.ANY -> "?" }
-                    },
-                    fontSize = 18.sp,
-                )
-            }
-            Column(Modifier.weight(1f)) {
-                Text("Speed", color = AirColors.Muted, fontSize = 13.sp)
-                Text("%.0f fps".format(state.fps), fontSize = 18.sp)
-            }
-        }
+        Muted("The frame is where your palm can go with the whole hand in view; it spans the screen. An edge lights up when your palm reaches it.")
         val have = d.hands > 0
         Meter(
-            "Pinch (ticks: closes / opens)",
-            if (have) "%.2f · %s".format(d.pinch, if (d.upright) "upright" else "tilted ${d.tiltDeg.toInt()}°") else "–",
-            if (have) 1f - d.pinch / PINCH_SCALE else 0f,
-            listOf(1f - d.pinchEnter / PINCH_SCALE, 1f - d.pinchExit / PINCH_SCALE),
+            "Pointer confidence",
+            if (have) "%.0f %%".format(d.pointerConfidence * 100) + (if (d.attention >= 0f) " · eyes %.0f %%".format(d.attention * 100) else "") else "–",
+            if (have) d.pointerConfidence else 0f,
+            emptyList(),
+            if (have && d.pointerConfidence < 0.5f) AirColors.Warn else AirColors.Text2,
+        )
+        Meter(
+            "Palm angle (ticks: tolerance, blocked)",
+            if (have) "%.0f°".format(d.angleDeg) else "–",
+            if (have) d.angleDeg / (d.angleTolDeg * 2.5f) else 0f,
+            listOf(1f / 2.5f, (d.angleTolDeg + 25f) / (d.angleTolDeg * 2.5f)),
+            if (have && d.angleDeg > d.angleTolDeg) AirColors.Warn else AirColors.Text2,
+        )
+        Meter(
+            "Thumb–index gap (ticks: touch, release)",
+            if (have) "%.2f".format(d.gap) + (if (d.cooldown) " · pause" else "") else "–",
+            if (have) 1f - d.gap / GAP_SCALE else 0f,
+            listOf(1f - d.tapEnter / GAP_SCALE, 1f - d.tapExit / GAP_SCALE),
             when {
                 !have -> AirColors.Muted
-                d.touch != "IDLE" -> AirColors.Ok
-                d.pinch < d.pinchEnter && !d.pinchReady -> AirColors.Bad
-                d.pinchReady -> AirColors.Coral
-                else -> AirColors.Muted
+                d.touchSource == TouchSource.TAP -> AirColors.Ok
+                d.cooldown -> AirColors.Muted
+                else -> AirColors.Coral
             },
         )
         Meter(
-            "Click: curl depth (tick = needed)",
-            if (have) "%.2f · dip %.2f/%.2f".format(d.reach, d.curlDepth, d.curlNeeded) else "–",
-            if (have) d.curlDepth / (d.curlNeeded * 1.5f) else 0f,
-            listOf(1f / 1.5f),
-            when {
-                d.clickAgoMs < CLICK_FLASH_MS -> AirColors.Ok
-                d.clickState == "CURLING" -> AirColors.Coral
-                else -> AirColors.Muted
-            },
+            "Last tap confidence",
+            "%.2f".format(d.clickConfidence) + "  " + TapGate.FACTOR_NAMES.indices.filter { d.clickFactors[it] in 0f..0.5f }
+                .joinToString(", ") { TapGate.FACTOR_NAMES[it] },
+            d.clickConfidence,
+            listOf(settings.clickStrictness.threshold),
+            AirColors.Text2,
         )
-        Text("Index reach: the dashed line is how low it must dip", color = AirColors.Muted, fontSize = 13.sp)
+        if (showPush) {
+            Meter(
+                "Air push (tick: the plane)",
+                if (have) "%.0f %%".format(d.push * 100) + (if (d.pushCalibrated) "" else " · floating") else "–",
+                if (have) d.push / TrackingRenderer.PUSH_GAUGE_MAX else 0f,
+                listOf(1f / TrackingRenderer.PUSH_GAUGE_MAX),
+                if (d.touchSource == TouchSource.PUSH) AirColors.Ok else AirColors.Coral,
+            )
+        }
+        Text("Thumb–index gap over time: a tap dips below the accent line", style = AirType.Caption, color = AirColors.Text2)
         Canvas(
             Modifier
                 .fillMaxWidth()
@@ -364,11 +294,8 @@ private fun LivePreview() {
             val step = size.width / (SPARK_N - 1)
             fun sy(v: Float) = size.height - ((v - SPARK_LO) / (SPARK_HI - SPARK_LO)).coerceIn(0f, 1f) * size.height
             val dashes = PathEffect.dashPathEffect(floatArrayOf(12f, 8f))
-            if (have && d.reachBaseline > 0f) {
-                drawLine(Color.White.copy(alpha = 0.35f), Offset(0f, sy(d.reachBaseline)), Offset(size.width, sy(d.reachBaseline)), strokeWidth = 2f, pathEffect = dashes)
-                val need = sy(d.reachBaseline - d.curlNeeded)
-                drawLine(AirColors.Coral, Offset(0f, need), Offset(size.width, need), strokeWidth = 3f, pathEffect = dashes)
-            }
+            drawLine(AirColors.Text.copy(alpha = 0.35f), Offset(0f, sy(d.tapExit)), Offset(size.width, sy(d.tapExit)), strokeWidth = 2f, pathEffect = dashes)
+            drawLine(AirColors.Coral, Offset(0f, sy(d.tapEnter)), Offset(size.width, sy(d.tapEnter)), strokeWidth = 3f, pathEffect = dashes)
             for (i in 0 until SPARK_N) {
                 if (hist.click[(hist.idx + i) % SPARK_N]) drawLine(AirColors.Ok, Offset(i * step, 0f), Offset(i * step, size.height), strokeWidth = 3f)
             }
@@ -379,40 +306,12 @@ private fun LivePreview() {
                 if (v.isNaN()) { pen = false; continue }
                 if (pen) path.lineTo(i * step, sy(v)) else { path.moveTo(i * step, sy(v)); pen = true }
             }
-            drawPath(path, Color.White, style = Stroke(width = 4f, cap = StrokeCap.Round))
+            drawPath(path, AirColors.Text, style = Stroke(width = 4f, cap = StrokeCap.Round))
         }
         if (d.bindLabel != null) Meter("Bind", d.bindLabel, d.bindProgress, emptyList(), AirColors.Coral)
         if (log.isNotEmpty()) {
-            Text("Events", color = AirColors.Muted, fontSize = 13.sp)
-            Text(log.takeLast(6).joinToString("\n"), fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+            Text("Events", style = AirType.Caption, color = AirColors.Text2)
+            Text(log.takeLast(6).joinToString("\n"), style = AirType.Figure, color = AirColors.Text)
         }
     }
-}
-
-@Composable
-private fun Meter(label: String, value: String, frac: Float, ticks: List<Float>, color: Color) {
-    Column {
-        Row(Modifier.fillMaxWidth()) {
-            Text(label, color = AirColors.Muted, fontSize = 13.sp, modifier = Modifier.weight(1f))
-            Text(value, fontSize = 13.sp)
-        }
-        Canvas(Modifier.fillMaxWidth().height(10.dp)) {
-            val r = CornerRadius(size.height / 2f)
-            drawRoundRect(AirColors.SurfaceHigh, size = size, cornerRadius = r)
-            if (frac > 0.005f) drawRoundRect(color, size = Size(size.width * frac.coerceIn(0f, 1f), size.height), cornerRadius = r)
-            ticks.forEach { t ->
-                val x = size.width * t.coerceIn(0f, 1f)
-                drawLine(Color.White, Offset(x, 0f), Offset(x, size.height), strokeWidth = 3f)
-            }
-        }
-    }
-}
-
-private fun poseLabel(d: EngineDebug): String = when {
-    d.hands == 0 -> "–"
-    d.pose != null -> "${d.pose.emoji} ${d.pose.label.substringBefore(" (").substringBefore(",")}"
-    d.sign == "ILoveYou" -> "🤟 arm"
-    d.sign == "Pointing_Up" -> "☝️ point"
-    d.sign != "None" -> d.sign
-    else -> "·"
 }

@@ -3,9 +3,11 @@ package app.aircontrol.service
 import android.accessibilityservice.AccessibilityService
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
+import app.aircontrol.gesture.ClickMethod
 import app.aircontrol.gesture.ControlEvent
 import app.aircontrol.overlay.OverlayController
 import app.aircontrol.settings.SettingsRepository
+import app.aircontrol.settings.TrackingView
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -51,29 +53,36 @@ class AirControlAccessibilityService : AccessibilityService() {
                 ov.view.previewSize = s.previewSize
                 ov.view.previewImage = s.previewImage
                 ov.view.showLog = s.showLog
-                ov.view.showPreview = s.showPreview
-                setDebugFeeds(s.showPreview, s.previewImage)
+                ov.view.trackingView = s.trackingView
+                ov.view.pushEnabled = s.clickMethod != ClickMethod.TAP
+                setDebugFeeds(s.trackingView != TrackingView.OFF, s.previewImage, keepAlive = s.trackingView == TrackingView.DIAGNOSTICS)
             }
         }
         connectedFlow.value = true
     }
 
     private var debugImage = false
+    private var debugKeepAlive = false
 
-    private fun setDebugFeeds(enabled: Boolean, image: Boolean) {
+    /**
+     * Feeds the tracking view. [keepAlive] keeps the overlay window up while tracking runs (the
+     * diagnostics panel is shown even when disarmed; the compact view only while armed).
+     */
+    private fun setDebugFeeds(enabled: Boolean, image: Boolean, keepAlive: Boolean) {
         val sc = scope ?: return
         val ov = overlay ?: return
-        if (enabled == (debugJob != null) && (!enabled || image == debugImage)) return
+        if (enabled == (debugJob != null) && (!enabled || (image == debugImage && keepAlive == debugKeepAlive))) return
         debugJob?.cancel()
         debugJob = null
         debugImage = image
+        debugKeepAlive = keepAlive
         if (enabled) {
             debugJob = sc.launch {
                 launch { ControlBus.snapshot.collect { ov.view.snapshot = it } }
                 launch {
                     ControlBus.state.collect { s ->
                         ov.view.trackingState = s
-                        ov.keepAlive = s.running
+                        ov.keepAlive = s.running && keepAlive
                     }
                 }
                 if (image) launch { ControlBus.preview.collect { ov.view.previewFrame = it } }
@@ -90,7 +99,7 @@ class AirControlAccessibilityService : AccessibilityService() {
         val gd = dispatcher ?: return
         ov.onEvent(e)
         if (e !is ControlEvent.Pointer && e !is ControlEvent.TouchMove && e !is ControlEvent.ArmProgress &&
-            e !is ControlEvent.BindProgress && !(e is ControlEvent.SwipeMode && e.axis == null)
+            e !is ControlEvent.BindProgress && e !is ControlEvent.Calibration
         ) {
             Log.i(TAG, "action $e")
         }
