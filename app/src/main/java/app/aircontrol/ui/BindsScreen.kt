@@ -219,7 +219,7 @@ private fun BindEditor(initial: Bind?, onDismiss: () -> Unit, onSave: (Bind) -> 
                     OutlinedButton(onClick = { picking = true }, Modifier.fillMaxWidth()) { Text(appLabel ?: "Choose an app", color = AirColors.Text) }
                 }
                 SettingSlider("Hold time", holdSec, 0.3f..2f, 16, { "%.1f s".format(it) }) { holdOverride = it }
-                countdown?.let { Text(it, style = AirType.BodyStrong, color = AirColors.Coral) }
+                countdown?.let { Text(it, style = AirType.BodyStrong, color = AirColors.Accent) }
                 OutlinedButton(
                     enabled = valid && countdown == null,
                     onClick = {

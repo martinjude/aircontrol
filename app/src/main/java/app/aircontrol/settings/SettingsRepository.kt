@@ -35,7 +35,7 @@ enum class PreviewSize(val label: String, val widthDp: Float) {
 }
 
 enum class GlowPreset(val label: String, val colors: IntArray) {
-    CORAL("Coral", intArrayOf(0xFFD97757.toInt(), 0xFFF2A65A.toInt(), 0xFFFF8A65.toInt(), 0xFFE8607A.toInt(), 0xFFD97757.toInt())),
+    SILVER("Silver", intArrayOf(0xFFE9E9EB.toInt(), 0xFFB8B8BD.toInt(), 0xFFFFFFFF.toInt(), 0xFF8E8E94.toInt(), 0xFFE9E9EB.toInt())),
     BLUE("Electric", intArrayOf(0xFF4FC3F7.toInt(), 0xFF7C4DFF.toInt(), 0xFF40C4FF.toInt(), 0xFF536DFE.toInt(), 0xFF4FC3F7.toInt())),
     VIOLET("Violet", intArrayOf(0xFFB388FF.toInt(), 0xFFEA80FC.toInt(), 0xFF8C9EFF.toInt(), 0xFFFF80AB.toInt(), 0xFFB388FF.toInt())),
     GREEN("Aurora", intArrayOf(0xFF69F0AE.toInt(), 0xFF00E5FF.toInt(), 0xFFB2FF59.toInt(), 0xFF64FFDA.toInt(), 0xFF69F0AE.toInt()));
@@ -75,7 +75,7 @@ data class AppSettings(
     val autoDisarmSec: Int = 20,
     val swapHands: Boolean = false,
     val binds: List<Bind> = Binds.defaults(),
-    val glow: GlowPreset = GlowPreset.CORAL,
+    val glow: GlowPreset = GlowPreset.SILVER,
     val trackingView: TrackingView = TrackingView.COMPACT,
     val previewSize: PreviewSize = PreviewSize.MEDIUM,
     val previewImage: Boolean = false,

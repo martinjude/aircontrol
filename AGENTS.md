@@ -80,7 +80,7 @@ There is no pinch mode and no index-curl click any more (both were removed in v2
   `SettingsRepository`, and bump `SETTINGS_VERSION` when an old value changes meaning.
 - Every engine decision that rejects a user action should emit `ControlEvent.ClickRejected(reason)`.
   The diagnostics log and the clip report show these reasons; they are the main tuning tool.
-- UI follows the "unslop" rules: one graphite ramp plus one coral accent (`Palette`), weights 400/500,
+- UI follows the "unslop" rules: one neutral graphite ramp plus one light-grey accent (`Palette`), weights 400/500,
   hairline borders, sentence case, no exclamation marks, no trailing periods on labels. Gestures are shown
   as emoji (`Emoji` composable, `Pose.emoji`). Line icons come from `AirIcons`.
 - Write user-facing copy in plain English.

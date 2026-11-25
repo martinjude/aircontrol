@@ -210,7 +210,7 @@ private fun HomeScreen(settings: AppSettings) {
     SectionCard {
         val (color, title) = when {
             !state.running -> AirColors.Muted to "Not running"
-            state.armed -> AirColors.Coral to "Gesture control on"
+            state.armed -> AirColors.Accent to "Gesture control on"
             else -> AirColors.Ok to "Watching for the arm sign"
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -323,7 +323,7 @@ private fun TestCard(enabled: Boolean, running: Boolean, armed: Boolean, launch:
     SectionCard("Test without the camera") {
         Muted("Checks that taps and swipes work on this device. Delayed actions give you 3 s to switch to another app.")
         if (!enabled) Text("Turn on the accessibility service first", style = AirType.Secondary, color = AirColors.Warn)
-        countdown?.let { Text(it, style = AirType.BodyStrong, color = AirColors.Coral) }
+        countdown?.let { Text(it, style = AirType.BodyStrong, color = AirColors.Accent) }
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             FilledTonalButton(enabled = enabled, onClick = {
                 if (running) {

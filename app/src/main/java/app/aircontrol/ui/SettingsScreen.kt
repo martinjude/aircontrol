@@ -58,7 +58,7 @@ fun SettingsScreen(settings: AppSettings, repo: SettingsRepository) {
     }
     val running = state.running
 
-    PageTitle("Settings", "Set the tracking view to Diagnostics under Look to see the meters while you tune, on top of any app.")
+    PageTitle("Settings", "Set the tracking view to Diagnostics under Look to see the meters while you tune, on top of any app.", logo = true)
 
     SectionCard("Calibration") {
         Muted("Do this once where you usually sit or stand. The screen guides you through each step.")

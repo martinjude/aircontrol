@@ -17,7 +17,7 @@ import app.aircontrol.settings.AppSettings
 
 @Composable
 fun HelpScreen(settings: AppSettings) {
-    PageTitle("How to use")
+    PageTitle("How to use", logo = true)
 
     SectionCard("Gestures") {
         Gesture("🤟", "Hold the arm sign for 1 s", "Turns gesture control on; the screen edge glows. Hold it again to turn it off.")

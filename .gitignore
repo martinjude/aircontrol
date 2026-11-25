@@ -13,4 +13,5 @@ keystore.properties
 app/src/main/assets/*.task
 # Gesture videos (large); the extracted landmark clips in app/src/test/resources/clips are committed.
 /testdata/videos/
+/testdata/raw/
 /scripts/.venv/

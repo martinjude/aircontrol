@@ -53,7 +53,7 @@ Put the videos in `testdata/videos/<device>/`, for example `testdata/videos/pixe
 | `neg_fast_cursor` | Fast cursor sweeps with a pointing hand |
 | `neg_wave_hello` | Wave at the camera |
 | `neg_walk_closer` | Step ~50 cm toward the camera and back |
-| `neg_person_behind` | Someone else moves and gestures behind you |
+| `neg_person_behind` | Someone else moves and gestures behind you | -> dont have it
 | `hold_drag_horizontal__drag2` | Thumb and index together, move left to right, release; 2× |
 | `hold_still__long1` | Thumb and index together, hold still 1.5 s |
 | `click_turned__click3` | Click with the palm turned ~20° toward you (should still work) |

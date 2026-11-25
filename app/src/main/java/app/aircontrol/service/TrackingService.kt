@@ -176,6 +176,7 @@ class TrackingService : LifecycleService(), FrameSink, VisionPipeline.Listener {
         val p = VisionPipeline(this, this).apply {
             mirror = settings.mirror
             poseEnabled = settings.usePose
+            poseWhileDisarmed = settings.requireBody && settings.usePose
             swapHands = settings.swapHands
             faceEnabled = settings.attentionGate && settings.attention != null
         }
@@ -223,6 +224,7 @@ class TrackingService : LifecycleService(), FrameSink, VisionPipeline.Listener {
         pipeline?.apply {
             mirror = s.mirror
             poseEnabled = s.usePose
+            poseWhileDisarmed = s.requireBody && s.usePose
             swapHands = s.swapHands
             faceEnabled = s.attentionGate && s.attention != null
         }
@@ -272,6 +274,7 @@ class TrackingService : LifecycleService(), FrameSink, VisionPipeline.Listener {
         val p = VisionPipeline(this, this).apply {
             mirror = settings.mirror
             poseEnabled = settings.usePose
+            poseWhileDisarmed = settings.requireBody && settings.usePose
             swapHands = settings.swapHands
             faceEnabled = settings.attentionGate && settings.attention != null
         }

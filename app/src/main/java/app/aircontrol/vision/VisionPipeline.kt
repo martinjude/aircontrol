@@ -45,6 +45,8 @@ class VisionPipeline(
     @Volatile var mirror = true
     @Volatile var poseEnabled = true
     @Volatile var poseEvery = 3
+    /** Also run pose while disarmed. Needed when the engine requires a visible body before it accepts the arm sign. */
+    @Volatile var poseWhileDisarmed = false
     /** Flips the detected left/right hand (safety switch in case the label comes out inverted). */
     @Volatile var swapHands = false
     /** Face (attention gate): runs while armed when enabled, or always while [faceAlways] (calibration). */
@@ -135,7 +137,7 @@ class VisionPipeline(
         val slot = frameCounter++ % every
         val p = pose
         val poseIdle = poseInFlightSince.let { it == 0L || now - it > IN_FLIGHT_TIMEOUT_MS }
-        if (p != null && poseEnabled && armed && poseIdle && slot == 0) {
+        if (p != null && poseEnabled && (armed || poseWhileDisarmed) && poseIdle && slot == 0) {
             poseInFlightSince = now
             try {
                 p.detectAsync(BitmapImageBuilder(bitmap).build(), ts)

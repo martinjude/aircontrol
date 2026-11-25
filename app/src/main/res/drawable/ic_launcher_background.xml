@@ -1,4 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
-<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
-    <gradient android:angle="135" android:startColor="#FF2A1F1A" android:endColor="#FF120E0C" />
-</shape>
+<!-- Radial purple gradient of design/app_logo.svg, positioned for the 72 dp visible area. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <path android:pathData="M0,0h108v108h-108z">
+        <aapt:attr name="android:fillColor">
+            <gradient android:type="radial" android:centerX="25.05" android:centerY="21.09" android:gradientRadius="88.36">
+                <item android:offset="0" android:color="#6746d6" />
+                <item android:offset="0.29" android:color="#6645d3" />
+                <item android:offset="0.49" android:color="#6541ca" />
+                <item android:offset="0.66" android:color="#623cbb" />
+                <item android:offset="0.81" android:color="#5e35a6" />
+                <item android:offset="0.95" android:color="#5a2b8a" />
+                <item android:offset="1" android:color="#58277e" />
+            </gradient>
+        </aapt:attr>
+    </path>
+</vector>

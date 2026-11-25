@@ -18,6 +18,8 @@ import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.SweepGradient
 import android.graphics.Typeface
+import androidx.core.content.res.ResourcesCompat
+import app.aircontrol.R
 import android.os.Build
 import android.os.SystemClock
 import android.view.RoundedCorner
@@ -53,7 +55,7 @@ class OverlayView(context: Context) : View(context) {
 
     var onIdle: (() -> Unit)? = null
 
-    var colors: IntArray = GlowPreset.CORAL.colors
+    var colors: IntArray = GlowPreset.SILVER.colors
         set(value) {
             field = value
             sweep = null
@@ -171,15 +173,19 @@ class OverlayView(context: Context) : View(context) {
         strokeCap = Paint.Cap.ROUND
         strokeJoin = Paint.Join.ROUND
     }
+    private val geistMedium: Typeface =
+        ResourcesCompat.getFont(context, R.font.geist_medium) ?: Typeface.create(Typeface.DEFAULT, 500, false)
+    private val geistMono: Typeface = ResourcesCompat.getFont(context, R.font.geist_mono) ?: Typeface.MONOSPACE
+
     private val text = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Palette.TEXT
         textSize = dp(14f)
-        typeface = Typeface.create(Typeface.DEFAULT, 500, false)
+        typeface = geistMedium
     }
     private val label = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Palette.TEXT
         textSize = dp(12f)
-        typeface = Typeface.create(Typeface.DEFAULT, 500, false)
+        typeface = geistMedium
     }
     private val rect = RectF()
     private val path = Path()
@@ -765,7 +771,7 @@ class OverlayView(context: Context) : View(context) {
 
     private val small = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         textSize = dp(10f)
-        typeface = Typeface.MONOSPACE
+        typeface = geistMono
     }
     private val dash = DashPathEffect(floatArrayOf(dp(4f), dp(3f)), 0f)
     private val rect2 = RectF()

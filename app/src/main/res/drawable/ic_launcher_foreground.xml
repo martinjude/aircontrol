@@ -1,16 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Glowing screen frame with a pointer ring: "the screen is under gesture control". -->
+<!-- The "air" mark from design/app_logo.svg. The 885.69 unit logo tile maps onto the 72 dp visible
+     area of the adaptive icon (18 dp margin all round), as in the original artwork. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp" android:height="108dp"
     android:viewportWidth="108" android:viewportHeight="108">
-    <path android:strokeColor="#55D97757" android:strokeWidth="7"
-        android:pathData="M38,30 h32 a6,6 0 0 1 6,6 v36 a6,6 0 0 1 -6,6 h-32 a6,6 0 0 1 -6,-6 v-36 a6,6 0 0 1 6,-6 z" />
-    <path android:strokeColor="#FFF2A65A" android:strokeWidth="2.5"
-        android:pathData="M38,30 h32 a6,6 0 0 1 6,6 v36 a6,6 0 0 1 -6,6 h-32 a6,6 0 0 1 -6,-6 v-36 a6,6 0 0 1 6,-6 z" />
-    <path android:strokeColor="#FFFFFFFF" android:strokeWidth="3"
-        android:pathData="M54,47 m-8,0 a8,8 0 1 0 16,0 a8,8 0 1 0 -16,0" />
-    <path android:fillColor="#FFD97757"
-        android:pathData="M54,47 m-3,0 a3,3 0 1 0 6,0 a3,3 0 1 0 -6,0" />
-    <path android:strokeColor="#FFFFFFFF" android:strokeWidth="2.5" android:strokeLineCap="round"
-        android:pathData="M44,64 q10,6 20,0" />
+    <group android:translateX="18" android:translateY="18" android:scaleX="0.081293" android:scaleY="0.081293">
+        <path android:fillColor="#FFFFFFFF"
+            android:pathData="M419.59,551.04h-39.93c0-39.14-31.84-70.97-70.97-70.97s-70.97,31.83-70.97,70.97h-39.93c0-61.15,49.75-110.9,110.9-110.9,26.97,0,51.72,9.67,70.97,25.74v-25.19c0-39.13-31.84-70.97-70.97-70.97s-70.97,31.84-70.97,70.97h-39.93c0-61.15,49.75-110.9,110.9-110.9s110.9,49.75,110.9,110.9V551.04Z" />
+        <path android:fillColor="#FFFFFFFF"
+            android:pathData="M469.73,334.65h39.93v216.39h-39.93Z" />
+        <path android:fillColor="#FFFFFFFF"
+            android:pathData="M597.21,551.04h-39.93v-114.98c0-61.01,49.64-110.65,110.66-110.65v39.93c-39,0-70.73,31.72-70.73,70.72V551.04Z" />
+    </group>
 </vector>

@@ -33,6 +33,21 @@ class GestureEngineTest {
     }
 
     @Test
+    fun requireBodyArmsWhenTheBodyIsSeenWhileDisarmed() {
+        // The pipeline must keep running pose while disarmed in this mode (VisionPipeline.poseWhileDisarmed).
+        val h = EngineHarness(EngineConfig(screenW = 1000, screenH = 2000, density = 2f, requireBody = true))
+        h.hold(1100, pose = SyntheticHands.pose(0.5f, 0.75f, 0.35f)) { hand(0.66f, 0.5f, gesture = Signs.I_LOVE_YOU) }
+        assertTrue(h.engine.armed)
+    }
+
+    @Test
+    fun requireBodyBlocksArmingWithoutAVisibleBody() {
+        val h = EngineHarness(EngineConfig(screenW = 1000, screenH = 2000, density = 2f, requireBody = true))
+        h.hold(1100) { hand(0.66f, 0.5f, gesture = Signs.I_LOVE_YOU) }
+        assertFalse(h.engine.armed)
+    }
+
+    @Test
     fun briefClassificationDropoutDoesNotBreakTheHold() {
         val h = EngineHarness()
         h.hold(1300) { ms ->

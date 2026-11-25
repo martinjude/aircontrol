@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -21,6 +22,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
+import androidx.compose.ui.res.painterResource
+import app.aircontrol.R
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
@@ -47,11 +50,23 @@ import kotlin.math.abs
 
 /** Page title: medium weight, hierarchy from size. */
 @Composable
-fun PageTitle(text: String, subtitle: String? = null) {
+fun PageTitle(text: String, subtitle: String? = null, logo: Boolean = false) {
     Column(Modifier.padding(top = 8.dp, bottom = 4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        if (logo) AirLogo(Modifier.padding(bottom = 8.dp))
         Text(text, style = AirType.Title, color = AirColors.Text)
         if (subtitle != null) Text(subtitle, style = AirType.Body, color = AirColors.Text2)
     }
+}
+
+/** The "air" mark in the muted text colour. */
+@Composable
+fun AirLogo(modifier: Modifier = Modifier, tint: Color = AirColors.Muted, height: Dp = 16.dp) {
+    Icon(
+        painterResource(R.drawable.ic_logo_mark),
+        contentDescription = "AirControl",
+        tint = tint,
+        modifier = modifier.height(height).aspectRatio(476f / 231f),
+    )
 }
 
 /** A card: one surface step above the page, a hairline, 20 padding, 12 between its rows. */

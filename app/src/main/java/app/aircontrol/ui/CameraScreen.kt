@@ -227,7 +227,7 @@ private fun LivePreview(settings: AppSettings) {
         }
         val (status, color) = TrackingRenderer.status(d, showPush)
         Row(verticalAlignment = Alignment.CenterVertically) {
-            StatusDot(if (state.armed) AirColors.Coral else AirColors.Muted)
+            StatusDot(if (state.armed) AirColors.Accent else AirColors.Muted)
             Spacer(Modifier.width(8.dp))
             Text(status, style = AirType.BodyStrong, color = Color(color), modifier = Modifier.weight(1f))
             Text(
@@ -262,7 +262,7 @@ private fun LivePreview(settings: AppSettings) {
                 !have -> AirColors.Muted
                 d.touchSource == TouchSource.TAP -> AirColors.Ok
                 d.cooldown -> AirColors.Muted
-                else -> AirColors.Coral
+                else -> AirColors.Accent
             },
         )
         Meter(
@@ -279,7 +279,7 @@ private fun LivePreview(settings: AppSettings) {
                 if (have) "%.0f %%".format(d.push * 100) + (if (d.pushCalibrated) "" else " · floating") else "–",
                 if (have) d.push / TrackingRenderer.PUSH_GAUGE_MAX else 0f,
                 listOf(1f / TrackingRenderer.PUSH_GAUGE_MAX),
-                if (d.touchSource == TouchSource.PUSH) AirColors.Ok else AirColors.Coral,
+                if (d.touchSource == TouchSource.PUSH) AirColors.Ok else AirColors.Accent,
             )
         }
         Text("Thumb–index gap over time: a tap dips below the accent line", style = AirType.Caption, color = AirColors.Text2)
@@ -295,7 +295,7 @@ private fun LivePreview(settings: AppSettings) {
             fun sy(v: Float) = size.height - ((v - SPARK_LO) / (SPARK_HI - SPARK_LO)).coerceIn(0f, 1f) * size.height
             val dashes = PathEffect.dashPathEffect(floatArrayOf(12f, 8f))
             drawLine(AirColors.Text.copy(alpha = 0.35f), Offset(0f, sy(d.tapExit)), Offset(size.width, sy(d.tapExit)), strokeWidth = 2f, pathEffect = dashes)
-            drawLine(AirColors.Coral, Offset(0f, sy(d.tapEnter)), Offset(size.width, sy(d.tapEnter)), strokeWidth = 3f, pathEffect = dashes)
+            drawLine(AirColors.Accent, Offset(0f, sy(d.tapEnter)), Offset(size.width, sy(d.tapEnter)), strokeWidth = 3f, pathEffect = dashes)
             for (i in 0 until SPARK_N) {
                 if (hist.click[(hist.idx + i) % SPARK_N]) drawLine(AirColors.Ok, Offset(i * step, 0f), Offset(i * step, size.height), strokeWidth = 3f)
             }
@@ -308,7 +308,7 @@ private fun LivePreview(settings: AppSettings) {
             }
             drawPath(path, AirColors.Text, style = Stroke(width = 4f, cap = StrokeCap.Round))
         }
-        if (d.bindLabel != null) Meter("Bind", d.bindLabel, d.bindProgress, emptyList(), AirColors.Coral)
+        if (d.bindLabel != null) Meter("Bind", d.bindLabel, d.bindProgress, emptyList(), AirColors.Accent)
         if (log.isNotEmpty()) {
             Text("Events", style = AirType.Caption, color = AirColors.Text2)
             Text(log.takeLast(6).joinToString("\n"), style = AirType.Figure, color = AirColors.Text)
