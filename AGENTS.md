@@ -12,6 +12,7 @@ export ANDROID_HOME=/opt/homebrew/share/android-commandlinetools
 ./gradlew testDebugUnitTest                 # all JVM tests (engine + recorded clips), ~10 s
 ./gradlew compileDebugKotlin                # quick compile check
 ./scripts/build-apk.sh                      # signed release APK → dist/AirControl-<version>.apk (runs R8)
+./scripts/install.sh                        # adb install -r + WRITE_SECURE_SETTINGS grant + a11y service on
 ./gradlew testDebugUnitTest --tests '*ClipReplayTest*' -Pclips=   # replay report for recorded gesture clips
 ```
 The app icons are vector drawables converted from `design/app_logo.svg`, which is kept locally and
@@ -50,6 +51,7 @@ UI (ui/) = Compose app: Control, Camera, Binds, Settings, Help.
 | Tracking panel drag handle (small touchable window on the panel's top edge) | `overlay/PreviewHandle.kt`, placed by `OverlayController` |
 | Camera-view drawing shared by the overlay and the Camera tab | `overlay/TrackingRenderer.kt` |
 | Colours, type, radii, icons | `ui/Palette.kt`, `ui/Theme.kt`, `ui/Icons.kt`, `ui/Components.kt` |
+| Accessibility service kept on across updates (WRITE_SECURE_SETTINGS + MY_PACKAGE_REPLACED) | `service/AccessibilityRestore.kt`, `scripts/install.sh` |
 | Calibration orchestration and saving results | `service/TrackingService.kt` (`calibrate`, `onCalibrated`) |
 | Calibration phases (READY countdown, HOLD, PUSH, STEP_DONE) | `GestureEngine.updateCalibration` / `emitCalibration`, `CalPhase` in `Model.kt` |
 

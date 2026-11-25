@@ -64,7 +64,7 @@ data class AppSettings(
     val angleTolerance: Float = 25f,
     /** Air plane fixed to the camera (5-point calibration); null = floating plane of [pushDepth]. */
     val pushCalibration: PushCalibration? = null,
-    val pushDepth: Float = 0.12f,
+    val pushDepth: Float = 0.3f,
     /** Cursor speed while pushed through the air plane (dragging). */
     val pushDragGain: Float = 0.35f,
     val swipesEnabled: Boolean = true,
@@ -202,7 +202,8 @@ class SettingsRepository(context: Context) {
             handReference = this[K.handReference]?.let(::decodeP3),
             angleTolerance = this[K.angleTolerance] ?: d.angleTolerance,
             pushCalibration = this[K.pushCalibration]?.let { PushCalibration.decode(it) },
-            pushDepth = this[K.pushDepth] ?: d.pushDepth,
+            // v6: the default went from 0.12 to 0.3; an untouched old default moves with it.
+            pushDepth = this[K.pushDepth]?.takeUnless { version < 6 && kotlin.math.abs(it - 0.12f) < 1e-3f } ?: d.pushDepth,
             pushDragGain = this[K.pushDragGain] ?: d.pushDragGain,
             swipesEnabled = this[K.swipesEnabled] ?: d.swipesEnabled,
             // v4 swipes are open-palm flicks measured in palm sizes: the old value means something else.
@@ -272,7 +273,7 @@ class SettingsRepository(context: Context) {
     }
 
     private companion object {
-        const val SETTINGS_VERSION = 5
+        const val SETTINGS_VERSION = 6
     }
 
     private fun decodeP3(s: String): P3? {

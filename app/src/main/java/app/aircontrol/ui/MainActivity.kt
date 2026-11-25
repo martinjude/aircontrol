@@ -68,6 +68,7 @@ import app.aircontrol.gesture.ControlEvent
 import app.aircontrol.gesture.DisarmReason
 import app.aircontrol.gesture.SwipeDir
 import app.aircontrol.gesture.SystemAction
+import app.aircontrol.service.AccessibilityRestore
 import app.aircontrol.service.AirControlAccessibilityService
 import app.aircontrol.service.ControlBus
 import app.aircontrol.service.TrackingService
@@ -153,6 +154,8 @@ data class SetupStatus(
 )
 
 fun readSetup(context: Context, a11yConnected: Boolean): SetupStatus {
+    // Switched off by an update? Switch it back on (only with the one-time adb grant).
+    AccessibilityRestore.ensureEnabled(context)
     val camera = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
     val notifications = Build.VERSION.SDK_INT < 33 ||
         ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
@@ -269,6 +272,10 @@ private fun HomeScreen(settings: AppSettings) {
         if (!setup.accessibility) {
             Muted("Switch greyed out (\"Restricted setting\")? Open App info, then ⋮ → Allow restricted settings, and come back.")
             TextButton(onClick = { openAppInfo(context) }) { Text("Open App info") }
+        }
+        if (!AccessibilityRestore.canRestore(context)) {
+            Muted("Has to be switched on again after every update? Run this once from a computer with the device connected, and AirControl switches it back on by itself:")
+            Text(AccessibilityRestore.GRANT_COMMAND, style = AirType.Figure, color = AirColors.Text2)
         }
         SetupRow("Battery: unrestricted", "Stops Android from killing tracking in the background", setup.battery, "Allow") {
             try {

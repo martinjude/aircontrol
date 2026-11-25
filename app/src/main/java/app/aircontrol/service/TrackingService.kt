@@ -165,6 +165,8 @@ class TrackingService : LifecycleService(), FrameSink, VisionPipeline.Listener {
     // ---------------------------------------------------------------- lifecycle
 
     private fun begin() {
+        // The accessibility service may have been switched off by an update.
+        AccessibilityRestore.ensureEnabled(this)
         settings = runBlocking { repo.flow.first() }
         val needsCamera = settings.source != SourceType.NETWORK
         if (needsCamera && ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {

@@ -331,7 +331,11 @@ class GestureEngine(config: EngineConfig, private val emit: (ControlEvent) -> Un
 
         // Air push.
         val pushEnabled = cfg.pushClicks && !signHeld && !calib && !flicking && touchSource != TouchSource.TAP
-        val p = push.update(t, feat, ox / cfg.screenW, oy / cfg.screenH, pushEnabled, frozen = touchSource == TouchSource.PUSH, cfg)
+        // A push is made with a pointing hand; an open palm is the swipe pose and never starts one.
+        val p = push.update(
+            t, feat, ox / cfg.screenW, oy / cfg.screenH, pushEnabled, frozen = touchSource == TouchSource.PUSH, cfg,
+            canPress = feat.extendedFingers < 4,
+        )
         updateAim(t, if (pushEnabled) p else 0f)
         updateConfidence(t, feat)
 

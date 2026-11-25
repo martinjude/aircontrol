@@ -422,9 +422,9 @@ class GestureEngineTest {
 
     // ------------------------------------------------------------ air push
 
-    /** Hand grows from palm size [s0] to [s1] in [inMs], holds, and shrinks back. */
+    /** Hand grows from palm size [s0] to [s1] in [inMs], holds, and shrinks back (default: ln 1.55 ≈ 0.44, well past the 0.3 plane). */
     private fun EngineHarness.push(
-        s0: Float = 0.1f, s1: Float = 0.118f, inMs: Long = 250, holdMs: Long = 100, outMs: Long = 250,
+        s0: Float = 0.1f, s1: Float = 0.155f, inMs: Long = 250, holdMs: Long = 100, outMs: Long = 250,
         x: (Long) -> Float = { 0.66f }, shape: Shape = Shape.POINT,
     ) {
         val base = t
@@ -453,9 +453,35 @@ class GestureEngineTest {
         val h = EngineHarness()
         h.arm()
         h.hold(1500) { hand(0.66f, 0.5f, Shape.POINT) }
-        h.push(s1 = 0.108f)
+        h.push(s1 = 0.12f)
         assertTrue(h.of<ControlEvent.Tap>().isEmpty())
         assertTrue(h.of<ControlEvent.Pointer>().any { it.push > 0.3f })
+    }
+
+    @Test
+    fun anOpenPalmNeverPushes() {
+        // The open palm is the swipe pose: moving it toward the camera must not touch the screen.
+        val h = EngineHarness()
+        h.arm()
+        h.hold(1500) { hand(0.66f, 0.5f, Shape.OPEN) }
+        h.push(shape = Shape.OPEN)
+        assertTrue(h.of<ControlEvent.Tap>().isEmpty())
+        assertTrue(h.of<ControlEvent.TouchDown>().isEmpty())
+    }
+
+    @Test
+    fun raisingAHandIntoViewDoesNotPush() {
+        // A hand coming up into the frame looks bigger frame after frame, like a push.
+        val h = EngineHarness()
+        h.arm()
+        h.hold(1000) { null }
+        h.hold(400) { ms -> hand(0.66f, 0.7f - 0.2f * (ms / 400f).coerceAtMost(1f), Shape.POINT, s = 0.08f + 0.025f * (ms / 400f).coerceAtMost(1f)) }
+        h.hold(800) { hand(0.66f, 0.5f, Shape.POINT, s = 0.105f) }
+        assertTrue(h.of<ControlEvent.TouchDown>().isEmpty())
+        assertTrue(h.of<ControlEvent.Tap>().isEmpty())
+        // Once settled, a real push still works.
+        h.push(s0 = 0.105f, s1 = 0.165f)
+        assertEquals(1, h.of<ControlEvent.Tap>().size)
     }
 
     @Test
@@ -635,6 +661,20 @@ class GestureEngineTest {
     }
 
     private fun EngineHarness.swipes() = of<ControlEvent.Swipe>().map { it.dir }
+
+    @Test
+    fun aFlickSurvivesAFrameOrTwoOfMotionBlur() {
+        // Recorded flicks often lose the hand for a frame or two mid-way, far from the frame edge.
+        val h = EngineHarness()
+        h.arm()
+        h.hold(300) { hand(0.8f, 0.5f, Shape.OPEN) }
+        h.hold(160) { t ->
+            val k = (t / 160f).coerceAtMost(1f)
+            if (t in 50L..110L) null else hand(0.8f - 0.3f * k, 0.5f, Shape.OPEN)
+        }
+        h.hold(250) { hand(0.5f, 0.5f, Shape.OPEN) }
+        assertEquals(listOf(SwipeDir.LEFT), h.swipes())
+    }
 
     @Test
     fun stillOpenPalmThenFlickSwipesInEachDirection() {

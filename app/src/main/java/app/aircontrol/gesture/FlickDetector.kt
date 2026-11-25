@@ -12,6 +12,8 @@ import kotlin.math.hypot
  *   [EngineConfig.flickMinPalms] palm sizes with a peak speed of [EngineConfig.flickMinPeakSpeed];
  *   all distances are in palm sizes so it feels the same at any distance from the camera.
  * - A hand lost mid-flick (motion blur) still counts if it was travelling fast toward the frame edge.
+ *   Otherwise the flick waits for the hand to come back (a frame or two of blur is common) and goes on
+ *   measuring from where it started.
  * - After a swipe the opposite direction is ignored for a while (the return stroke) and the hand must
  *   be still again before the next one.
  *
@@ -94,7 +96,10 @@ internal class FlickDetector {
         return null
     }
 
-    /** The hand vanished. A flick in progress toward the frame edge still counts (motion blur). */
+    /**
+     * The hand vanished. A flick in progress toward the frame edge still counts (motion blur); any other
+     * flick in progress waits for the hand to come back, until its window runs out.
+     */
     fun onHandLost(t: Long, aspect: Float, cfg: EngineConfig): SwipeDir? {
         // A dropout while holding still keeps the hand ready; the caller resets once the hand is really gone.
         if (!moving) return null
@@ -102,8 +107,8 @@ internal class FlickDetector {
         val s = startSize.coerceAtLeast(1e-4f)
         val dx = lastX - startX
         val dy = lastY - startY
-        if (hypot(dx, dy) / s < 1f || peak < cfg.flickMinPeakSpeed) { reset(); return null }
-        val dir = direction(dx, dy, cfg) ?: run { reset(); return null }
+        if (hypot(dx, dy) / s < 1f || peak < cfg.flickMinPeakSpeed) return null
+        val dir = direction(dx, dy, cfg) ?: return null
         val margin = EDGE_PALMS * s
         val nearEdge = when (dir) {
             SwipeDir.LEFT -> lastX < margin
@@ -111,7 +116,7 @@ internal class FlickDetector {
             SwipeDir.UP -> lastY < margin
             SwipeDir.DOWN -> lastY > 1f - margin
         }
-        return if (nearEdge) fire(t, dir, cfg) else { reset(); null }
+        return if (nearEdge) fire(t, dir, cfg) else null
     }
 
     private fun judge(x: Float, y: Float, cfg: EngineConfig): SwipeDir? {

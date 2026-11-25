@@ -229,8 +229,11 @@ data class EngineConfig(
     // Air push: a virtual plane at a fixed distance from the camera (calibrated at 5 points);
     // without a calibration it floats a fixed push in front of the resting hand.
     val pushCalibration: PushCalibration? = null,
-    /** Uncalibrated plane: ln(hand scale) growth from rest to the plane (0.12 ≈ ~10 cm at 1 m). */
-    val pushDepth: Float = 0.12f,
+    /**
+     * Uncalibrated plane: ln(hand scale) growth from rest to the plane (0.3 ≈ 26 cm at 1 m). Recorded
+     * pushes go much deeper than 0.12 (the old default), which fired on raising or moving the hand.
+     */
+    val pushDepth: Float = 0.3f,
     /** Uncalibrated plane: how fast the rest position follows the hand. */
     val pushRestTauMs: Long = 1500,
     /** Proximity (1 = plane) at which the touch starts / ends. */

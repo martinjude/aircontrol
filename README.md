@@ -52,9 +52,14 @@ was tested on a Pixel 8 and a Pixel 8-class emulator running Android 17.
    ```sh
    export PATH=/opt/homebrew/share/android-commandlinetools/platform-tools:$PATH
    adb devices                                  # accept the prompt on the device
-   adb install -r dist/AirControl-2.4.0.apk
+   ./scripts/install.sh                         # installs/updates dist/AirControl-<version>.apk
    ```
    For Wireless debugging use `adb pair <ip>:<pair-port>` then `adb connect <ip>:<port>`.
+
+   `install.sh` also grants AirControl one extra permission (`WRITE_SECURE_SETTINGS`) and switches
+   the accessibility service on. With that permission, which stays through updates and is lost only
+   on uninstall, AirControl switches its accessibility service back on by itself after every update,
+   however the update is installed. Run it once per device; afterwards Option B works too.
 
 ### Option B: copy the APK to the device
 Open the file and allow your file manager to install unknown apps.

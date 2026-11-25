@@ -140,7 +140,7 @@ fun SettingsScreen(settings: AppSettings, repo: SettingsRepository) {
             }
             Muted("How fast the cursor moves while pushed through the plane. Low makes drags precise.")
             if (settings.pushCalibration == null) {
-                SettingSlider("Push depth", settings.pushDepth, 0.05f..0.3f, 24, { pushCm(it) }, D.pushDepth) { v ->
+                SettingSlider("Push depth", settings.pushDepth, 0.05f..0.6f, 10, { pushCm(it) }, D.pushDepth) { v ->
                     update { it.copy(pushDepth = v) }
                 }
                 Muted("Until the air plane is calibrated, it floats this far in front of your resting hand.")

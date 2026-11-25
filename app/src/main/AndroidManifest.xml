@@ -21,6 +21,11 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- Optional, granted once over adb: lets the app switch its accessibility service back on
+         after an update (service/AccessibilityRestore.kt). -->
+    <uses-permission
+        android:name="android.permission.WRITE_SECURE_SETTINGS"
+        tools:ignore="ProtectedPermissions" />
 
     <application
         android:allowBackup="false"
@@ -51,6 +56,15 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Analyses a local network camera stream on-device for hands-free gesture control of the phone" />
         </service>
+
+        <!-- MY_PACKAGE_REPLACED is a protected broadcast: only the system sends it, to this app only. -->
+        <receiver
+            android:name=".service.AccessibilityRestore$UpdateReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
 
         <service
             android:name=".service.AirControlAccessibilityService"
