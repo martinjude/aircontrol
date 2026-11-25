@@ -66,6 +66,7 @@ class TrackingService : LifecycleService(), FrameSink, VisionPipeline.Listener {
         const val ACTION_STOP = "app.aircontrol.action.STOP"
         const val ACTION_TOGGLE_ARM = "app.aircontrol.action.TOGGLE_ARM"
         const val ACTION_CALIBRATE = "app.aircontrol.action.CALIBRATE"
+        const val ACTION_CANCEL_CALIBRATION = "app.aircontrol.action.CANCEL_CALIBRATION"
         const val EXTRA_KIND = "kind"
         private const val CHANNEL = "tracking"
         private const val NOTIFICATION_ID = 1
@@ -144,7 +145,17 @@ class TrackingService : LifecycleService(), FrameSink, VisionPipeline.Listener {
                     .mapNotNull { k -> CalibrationKind.entries.firstOrNull { it.name == k } }
                 calQueue.clear()
                 calQueue.addAll(kinds)
+                calSeqSize = kinds.size
+                calSeqIndex = 0
                 startNextCalibration()
+            }
+            ACTION_CANCEL_CALIBRATION -> {
+                calQueue.clear()
+                engineThread.execute { engine.cancelCalibration() }
+                if (calibrating) {
+                    calibrating = false
+                    updateNotification()
+                }
             }
             else -> if (!running) begin()
         }
@@ -388,14 +399,25 @@ class TrackingService : LifecycleService(), FrameSink, VisionPipeline.Listener {
 
     /** Calibrations still to run (a "calibrate everything" sequence). Touched on the main thread only. */
     private val calQueue = ArrayDeque<CalibrationKind>()
+    private var calSeqIndex = 0
+    private var calSeqSize = 1
+    /** A calibration runs (main thread): the notification offers to stop it. */
+    private var calibrating = false
 
     private fun startNextCalibration() {
         val kind = calQueue.removeFirstOrNull() ?: return
+        val index = calSeqIndex++
+        val size = calSeqSize
         pipeline?.faceAlways = kind == CalibrationKind.ATTENTION
-        engineThread.execute { engine.startCalibration(kind) }
+        engineThread.execute { engine.startCalibration(kind, index, size) }
+        if (!calibrating) {
+            calibrating = true
+            updateNotification()
+        }
     }
 
     private fun onCalibrated(e: ControlEvent.Calibration) {
+        Log.i(TAG, "calibration ${e.kind} done: ${e.message} (${if (e.result != null) "saved" else "no result"})")
         main.post {
             pipeline?.faceAlways = false
             val r = e.result
@@ -409,10 +431,15 @@ class TrackingService : LifecycleService(), FrameSink, VisionPipeline.Listener {
                         }
                     }
                 }
-                // Next step after a short pause, so the "calibrated" message can be read.
-                main.postDelayed({ startNextCalibration() }, 1200)
+                // Next step after a pause, so the "calibrated" message can be read; its own
+                // countdown then introduces it.
+                main.postDelayed({ startNextCalibration() }, 1800)
             } else {
                 calQueue.clear()
+            }
+            if (calQueue.isEmpty() && calibrating) {
+                calibrating = false
+                updateNotification()
             }
         }
     }
@@ -446,20 +473,30 @@ class TrackingService : LifecycleService(), FrameSink, VisionPipeline.Listener {
         val stop = PendingIntent.getService(
             this, 2, Intent(this, TrackingService::class.java).setAction(ACTION_STOP), flags,
         )
+        val cancelCal = PendingIntent.getService(
+            this, 3, Intent(this, TrackingService::class.java).setAction(ACTION_CANCEL_CALIBRATION), flags,
+        )
         val label = source?.label ?: when (settings.source) {
             SourceType.FRONT -> "Front camera"
             SourceType.BACK -> "Back camera"
             SourceType.NETWORK -> "Network camera"
         }
-        return NotificationCompat.Builder(this, CHANNEL)
+        val b = NotificationCompat.Builder(this, CHANNEL)
             .setSmallIcon(R.drawable.ic_stat_aircontrol)
-            .setContentTitle(if (armed) "Gesture control ON" else "AirControl is watching for 🤟")
-            .setContentText(if (armed) "Hold 🤟 for 1 s to turn it off" else "$label · hold 🤟 for 1 s to take control")
             .setOngoing(true)
             .setSilent(true)
             .setShowWhen(false)
             .setContentIntent(open)
-            .addAction(0, if (armed) "Disarm" else "Arm now", toggle)
+        if (calibrating) {
+            b.setContentTitle("Calibrating")
+                .setContentText("Follow the card on the screen")
+                .addAction(0, "Stop calibration", cancelCal)
+        } else {
+            b.setContentTitle(if (armed) "Gesture control on" else "AirControl is watching for 🤟")
+                .setContentText(if (armed) "Hold 🤟 for 1 s to turn it off" else "$label · hold 🤟 for 1 s to take control")
+                .addAction(0, if (armed) "Disarm" else "Arm now", toggle)
+        }
+        return b
             .addAction(0, "Stop", stop)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)

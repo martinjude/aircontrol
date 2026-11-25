@@ -80,6 +80,11 @@ data class AppSettings(
     val previewSize: PreviewSize = PreviewSize.MEDIUM,
     val previewImage: Boolean = false,
     val showLog: Boolean = true,
+    /** Where the tracking panel sits: its centre, normalized to the screen (-1 = the default bottom-right corner). */
+    val previewX: Float = -1f,
+    val previewY: Float = -1f,
+    /** Opacity of the tracking panel over other apps (0.3..1). */
+    val previewOpacity: Float = 0.7f,
     val requireBody: Boolean = false,
 ) {
     fun applyTo(base: EngineConfig): EngineConfig = base.copy(
@@ -154,6 +159,9 @@ class SettingsRepository(context: Context) {
         val previewSize = stringPreferencesKey("preview_size")
         val previewImage = booleanPreferencesKey("preview_image")
         val showLog = booleanPreferencesKey("show_log")
+        val previewX = floatPreferencesKey("preview_x")
+        val previewY = floatPreferencesKey("preview_y")
+        val previewOpacity = floatPreferencesKey("preview_opacity")
         val requireBody = booleanPreferencesKey("require_body")
 
         // v2 keys, only read to migrate.
@@ -215,6 +223,9 @@ class SettingsRepository(context: Context) {
             previewSize = enumOr(this[K.previewSize], d.previewSize),
             previewImage = this[K.previewImage] ?: d.previewImage,
             showLog = this[K.showLog] ?: d.showLog,
+            previewX = this[K.previewX] ?: d.previewX,
+            previewY = this[K.previewY] ?: d.previewY,
+            previewOpacity = (this[K.previewOpacity] ?: d.previewOpacity).coerceIn(0.3f, 1f),
             requireBody = this[K.requireBody] ?: d.requireBody,
         )
     }
@@ -254,6 +265,9 @@ class SettingsRepository(context: Context) {
         this[K.previewSize] = s.previewSize.name
         this[K.previewImage] = s.previewImage
         this[K.showLog] = s.showLog
+        this[K.previewX] = s.previewX
+        this[K.previewY] = s.previewY
+        this[K.previewOpacity] = s.previewOpacity
         this[K.requireBody] = s.requireBody
     }
 

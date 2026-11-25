@@ -26,7 +26,7 @@ fun HelpScreen(settings: AppSettings) {
             Gesture("👌", "Touch thumb and index", "A quick touch clicks where the cursor was. Keep them together to hold: move to drag or scroll, stay still for a long press. Two arcs close on the cursor as your fingers meet.")
         }
         if (settings.clickMethod != ClickMethod.TAP) {
-            Gesture("👉", "Push toward the screen", "Air push. A glow under the cursor grows as your hand nears an invisible plane; pushing through it touches the screen. Pull back to release. While pushed in, the cursor moves slowly for precise drags.")
+            Gesture("👉", "Push toward the screen", "Air push. A ring closes in on the cursor as your hand nears an invisible plane; pushing through it touches the screen. Pull back to release. While pushed in, the cursor moves slowly for precise drags.")
         }
         if (settings.swipesEnabled) {
             Gesture("🖐", "Still open palm, then flick", "Swipe left, right, up or down. The way back is ignored for a moment.")
@@ -34,8 +34,15 @@ fun HelpScreen(settings: AppSettings) {
         Muted("After any pose (a bind or 🤟), taps, pushes and swipes wait a moment, so changing back to pointing never clicks. Gesture control turns itself off after ${settings.autoDisarmSec} s without a hand.")
     }
 
+    SectionCard("The glow") {
+        Muted("While you hold 🤟, the screen edge fills up from the bottom. When control turns on, light runs up both sides. It drains back down when control turns off.")
+        Muted("The glow dims while no hand is seen, and a message counts down to when control turns off. It brightens for a moment after each click, swipe or bind.")
+    }
+
     SectionCard("The cursor") {
         Muted("A full ring means the pointer is trusted. A thin arc around it shows the confidence when it drops: palm turned away, shaky tracking, or the hand at the edge of the frame.")
+        Muted("The ring tightens and its centre grows as thumb and index close. A dashed grey ring means actions are paused after a pose. A red ring with a slash means the palm is turned too far for taps.")
+        Muted("An orange arc with an arrow on one side means your hand is at that edge of the area the camera can follow. Move it back toward the centre.")
         Muted("A green dot above the ring means your eyes are on the screen (after the gaze calibration).")
     }
 
@@ -57,7 +64,8 @@ fun HelpScreen(settings: AppSettings) {
     SectionCard("Tips for reliable tracking") {
         Muted("Stay 0.5 to 2 m from the camera with your head and shoulders in view.")
         Muted("Even light helps. Avoid a bright window behind you.")
-        Muted("Run Settings, Calibration, Calibrate everything once in your usual spot: hand angle, air plane and gaze.")
+        Muted("Run Settings, Calibration, Calibrate everything once in your usual spot: hand angle, air plane and gaze. Each step shows a card with a countdown before it measures anything. To stop, use Stop calibration in the notification.")
+        Muted("The tracking panel can be moved: drag the small handle on its top edge. Double-tap the handle to put it back in the corner.")
         Muted("If clicks still fire by accident, set Strictness to Strict or lengthen the pause after a pose.")
         Muted("To see why a click was or wasn't accepted, set Settings, Look, Tracking view to Diagnostics. Its event log lists every rejection with the reason.")
     }

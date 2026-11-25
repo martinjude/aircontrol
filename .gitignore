@@ -15,3 +15,7 @@ app/src/main/assets/*.task
 /testdata/videos/
 /testdata/raw/
 /scripts/.venv/
+
+/design/
+# Degraded copies of the clips (scripts/extract-clips.py --augment), rebuilt from the videos.
+app/src/test/resources/clips/*~*/

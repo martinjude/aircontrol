@@ -46,13 +46,19 @@ class AirControlAccessibilityService : AccessibilityService() {
         dispatcher = gd
         scope = sc
         sc.launch { ControlBus.events.collect { handle(it) } }
+        val repo = SettingsRepository(this)
+        ov.onPreviewMoved = { u, v -> sc.launch { repo.update { it.copy(previewX = u, previewY = v) } } }
         sc.launch {
-            SettingsRepository(this@AirControlAccessibilityService).flow.collect { s ->
+            repo.flow.collect { s ->
                 swipeLength = s.swipeLength
                 ov.view.colors = s.glow.colors
                 ov.view.previewSize = s.previewSize
                 ov.view.previewImage = s.previewImage
                 ov.view.showLog = s.showLog
+                ov.view.previewX = s.previewX
+                ov.view.previewY = s.previewY
+                ov.view.previewOpacity = s.previewOpacity
+                ov.view.autoDisarmMs = s.autoDisarmSec * 1000L
                 ov.view.trackingView = s.trackingView
                 ov.view.pushEnabled = s.clickMethod != ClickMethod.TAP
                 setDebugFeeds(s.trackingView != TrackingView.OFF, s.previewImage, keepAlive = s.trackingView == TrackingView.DIAGNOSTICS)

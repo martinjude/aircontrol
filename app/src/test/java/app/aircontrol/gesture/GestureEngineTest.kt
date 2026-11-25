@@ -331,7 +331,7 @@ class GestureEngineTest {
         val h = EngineHarness()
         h.hold(300) { hand(0.66f, 0.5f, Shape.OPEN, yawDeg = 35f) }
         h.engine.startCalibration(CalibrationKind.HAND)
-        h.hold(2300) { hand(0.66f, 0.5f, Shape.OPEN, yawDeg = 35f) }
+        h.hold(5300) { hand(0.66f, 0.5f, Shape.OPEN, yawDeg = 35f) }
         val r = h.of<ControlEvent.Calibration>().last { it.done }.result!!
         val ref = P3(r[0], r[1], r[2])
         val turned = HandFeatures.from(hand(0.66f, 0.5f, Shape.OPEN, yawDeg = 35f), SyntheticHands.ASPECT)
@@ -412,7 +412,7 @@ class GestureEngineTest {
         h.face = FaceObservation(5f, -3f, 1f, 0f)
         h.hold(200) { hand(0.66f, 0.5f, Shape.POINT) }
         h.engine.startCalibration(CalibrationKind.ATTENTION)
-        h.hold(3300) { hand(0.66f, 0.5f, Shape.POINT) }
+        h.hold(6300) { hand(0.66f, 0.5f, Shape.POINT) }
         val done = h.of<ControlEvent.Calibration>().last()
         assertTrue(done.done)
         val r = done.result!!
@@ -536,8 +536,10 @@ class GestureEngineTest {
         val h = EngineHarness()
         h.hold(300) { hand(0.66f, 0.5f, Shape.POINT) }
         h.engine.startCalibration(CalibrationKind.PUSH)
-        for ((u, v) in PushCalibration.TARGETS) {
-            val (x, y) = palmFor(u, v)
+        for ((i, target) in PushCalibration.TARGETS.withIndex()) {
+            val (x, y) = palmFor(target.first, target.second)
+            // The countdown before the first dot; the pause after each point before the next.
+            h.hold(if (i == 0) 3100 else 1500) { hand(x, y, Shape.POINT) }
             h.hold(1400) { hand(x, y, Shape.POINT) }
             h.hold(250) { ms -> hand(x, y, Shape.POINT, s = 0.1f + 0.015f * (ms / 250f).coerceAtMost(1f)) }
             h.hold(1300) { hand(x, y, Shape.POINT, s = 0.115f) }
@@ -553,13 +555,72 @@ class GestureEngineTest {
     }
 
     @Test
+    fun theCalibrationMeasuresNothingDuringTheCountdown() {
+        val h = EngineHarness()
+        h.hold(300) { hand(0.66f, 0.5f, Shape.OPEN) }
+        h.engine.startCalibration(CalibrationKind.HAND, sequenceIndex = 1, sequenceSize = 3)
+        // Facing the camera while reading the instruction, then the comfortable turned angle.
+        h.hold(2900) { hand(0.66f, 0.5f, Shape.OPEN) }
+        val ready = h.of<ControlEvent.Calibration>()
+        assertTrue(ready.isNotEmpty() && ready.all { it.phase == CalPhase.READY && !it.done })
+        assertTrue("counts down", ready.first().countdownMs > ready.last().countdownMs)
+        assertTrue(ready.first().countdownMs > 2500)
+        assertTrue(ready.all { it.sequenceIndex == 1 && it.sequenceSize == 3 && it.stepCount == 1 })
+        h.hold(2400) { hand(0.66f, 0.5f, Shape.OPEN, yawDeg = 35f) }
+        val done = h.of<ControlEvent.Calibration>().last { it.done }
+        assertEquals(3, done.sequenceSize)
+        val r = done.result!!
+        val turned = HandFeatures.from(hand(0.66f, 0.5f, Shape.OPEN, yawDeg = 35f), SyntheticHands.ASPECT)
+        assertEquals(0f, turned.angleTo(P3(r[0], r[1], r[2])), 2f)
+        assertTrue(h.of<ControlEvent.Calibration>().any { it.phase == CalPhase.HOLD })
+    }
+
+    @Test
+    fun thePushCalibrationPausesAfterEachPoint() {
+        val h = EngineHarness()
+        h.hold(300) { hand(0.66f, 0.5f, Shape.POINT) }
+        h.engine.startCalibration(CalibrationKind.PUSH)
+        val (x0, y0) = palmFor(PushCalibration.TARGETS[0].first, PushCalibration.TARGETS[0].second)
+        h.hold(3100) { hand(x0, y0, Shape.POINT) }
+        h.hold(1400) { hand(x0, y0, Shape.POINT) }
+        h.hold(250) { ms -> hand(x0, y0, Shape.POINT, s = 0.1f + 0.015f * (ms / 250f).coerceAtMost(1f)) }
+        h.hold(1000) { hand(x0, y0, Shape.POINT, s = 0.115f) }
+        val stepDone = h.of<ControlEvent.Calibration>().filter { it.phase == CalPhase.STEP_DONE }
+        assertTrue("the finished point is shown", stepDone.isNotEmpty())
+        assertEquals(PushCalibration.TARGETS[0].first, stepDone.first().targetX)
+        assertEquals(5, stepDone.first().stepCount)
+        // Already on the next dot: nothing is measured until the pause is over.
+        val (u1, v1) = PushCalibration.TARGETS[1]
+        val (x1, y1) = palmFor(u1, v1)
+        h.events.clear()
+        h.hold(1100) { hand(x1, y1, Shape.POINT) }
+        assertTrue(h.of<ControlEvent.Calibration>().none { it.step == 1 && it.phase == CalPhase.HOLD })
+        assertTrue(h.of<ControlEvent.Calibration>().any { it.step == 1 && it.phase == CalPhase.READY && it.targetX == u1 })
+        h.hold(600) { hand(x1, y1, Shape.POINT) }
+        assertTrue(h.of<ControlEvent.Calibration>().any { it.step == 1 && it.phase == CalPhase.HOLD })
+    }
+
+    @Test
+    fun cancellingACalibrationEndsItWithoutAResult() {
+        val h = EngineHarness()
+        h.hold(300) { hand(0.66f, 0.5f, Shape.OPEN) }
+        h.engine.startCalibration(CalibrationKind.HAND)
+        h.hold(1000) { hand(0.66f, 0.5f, Shape.OPEN) }
+        h.engine.cancelCalibration()
+        val done = h.of<ControlEvent.Calibration>().last()
+        assertTrue(done.done)
+        assertEquals(null, done.result)
+        assertEquals(null, h.engine.calibrating)
+    }
+
+    @Test
     fun thePushCalibrationWaitsForTheHandOnTheDot() {
         val h = EngineHarness()
         h.hold(300) { hand(0.66f, 0.5f, Shape.POINT) }
         h.engine.startCalibration(CalibrationKind.PUSH)
         // The centre dot, but the hand stays in a corner: no progress.
         val (x, y) = palmFor(0.1f, 0.9f)
-        h.hold(3000) { hand(x, y, Shape.POINT) }
+        h.hold(6000) { hand(x, y, Shape.POINT) }
         assertTrue(h.of<ControlEvent.Calibration>().none { it.done })
         assertTrue(h.of<ControlEvent.Calibration>().last().progress < 0.05f)
     }

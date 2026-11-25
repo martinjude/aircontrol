@@ -208,6 +208,20 @@ fun SettingsScreen(settings: AppSettings, repo: SettingsRepository) {
             SwitchRow("Show the camera image", "Draws the picture behind the hand (uses a little more GPU).", settings.previewImage) { v ->
                 update { it.copy(previewImage = v) }
             }
+            SettingSlider("Panel opacity", settings.previewOpacity, 0.3f..1f, 13, { "${(it * 100).roundToInt()} %" }, D.previewOpacity) { v ->
+                update { it.copy(previewOpacity = v) }
+            }
+            Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text("Panel position", style = AirType.Body, color = AirColors.Text)
+                    Muted("Drag the handle on top of the panel to move it. Double-tap the handle to put it back.")
+                }
+                Spacer(Modifier.width(12.dp))
+                OutlinedButton(
+                    enabled = settings.previewX >= 0f,
+                    onClick = { update { it.copy(previewX = -1f, previewY = -1f) } },
+                ) { Text("Reset", color = AirColors.Text) }
+            }
         }
         if (settings.trackingView == TrackingView.DIAGNOSTICS) {
             DropdownRow("Panel size", settings.previewSize, PreviewSize.entries, { it.label }) { v -> update { it.copy(previewSize = v) } }
@@ -241,6 +255,7 @@ fun SettingsScreen(settings: AppSettings, repo: SettingsRepository) {
             AppSettings(
                 source = it.source, networkUrl = it.networkUrl, mirror = it.mirror, networkRotation = it.networkRotation,
                 binds = it.binds, trackingView = it.trackingView, previewSize = it.previewSize,
+                previewX = it.previewX, previewY = it.previewY, previewOpacity = it.previewOpacity,
                 attention = it.attention, handReference = it.handReference, pushCalibration = it.pushCalibration,
             )
         }

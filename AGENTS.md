@@ -14,7 +14,8 @@ export ANDROID_HOME=/opt/homebrew/share/android-commandlinetools
 ./scripts/build-apk.sh                      # signed release APK → dist/AirControl-<version>.apk (runs R8)
 ./gradlew testDebugUnitTest --tests '*ClipReplayTest*' -Pclips=   # replay report for recorded gesture clips
 ```
-Always build the **release** APK before shipping: R8 breaks MediaPipe without the keep rules in
+The app icons are vector drawables converted from `design/app_logo.svg`, which is kept locally and
+not in git (`/design/` is ignored). Always build the **release** APK before shipping: R8 breaks MediaPipe without the keep rules in
 `app/proguard-rules.pro`. Never touch `keystore/` or `keystore.properties`: updates must be signed with
 the same key. Don't commit unless asked.
 
@@ -45,10 +46,12 @@ UI (ui/) = Compose app: Control, Camera, Binds, Settings, Help.
 | Hand geometry (palm size, palm normal, finger extension, hand angle) | `gesture/HandFeatures.kt` |
 | Bindable poses and binds | `gesture/Binds.kt`, `gesture/HandPose.kt`, `gesture/BindMatcher.kt` |
 | User settings ↔ engine config, persistence, migrations | `settings/SettingsRepository.kt` |
-| Overlay drawing (pointer, warning shade, pills, calibration targets, tracking view) | `overlay/OverlayView.kt` |
+| Overlay drawing (glow charge/lap/drain, pointer states, warning shade, pills, calibration card and targets, tracking panel) | `overlay/OverlayView.kt` |
+| Tracking panel drag handle (small touchable window on the panel's top edge) | `overlay/PreviewHandle.kt`, placed by `OverlayController` |
 | Camera-view drawing shared by the overlay and the Camera tab | `overlay/TrackingRenderer.kt` |
 | Colours, type, radii, icons | `ui/Palette.kt`, `ui/Theme.kt`, `ui/Icons.kt`, `ui/Components.kt` |
 | Calibration orchestration and saving results | `service/TrackingService.kt` (`calibrate`, `onCalibrated`) |
+| Calibration phases (READY countdown, HOLD, PUSH, STEP_DONE) | `GestureEngine.updateCalibration` / `emitCalibration`, `CalPhase` in `Model.kt` |
 
 ## The gestures (current design, v2.3)
 - **🤟 held 1 s**: arm/disarm. Disarmed, the engine still analyses the hand for the preview but emits no actions.
@@ -91,6 +94,9 @@ The user films gestures on the device (`testdata/videos/<device>/`, gitignored).
 `app/src/test/resources/clips/<device>/*.jsonl`, and `ClipReplayTest` replays them. **The file name is the
 expectation** (`click_center__click3`, `neg_*` = no actions at all). See `testdata/README.md`. When the
 user reports misfires, ask for clips, replay them and read the reject reasons before changing thresholds.
+`extract-clips.py --augment all` adds degraded copies in `clips/<device>~<variant>/` (gitignored); the
+report summarises them per folder and they don't fail the test. Calibration in `ClipRunner` skips the
+READY countdown (`readyMs = 0`).
 
 ## Pitfalls already paid for
 - MediaPipe LIVE_STREAM queues frames when inference is slow; `VisionPipeline.busy()` keeps one frame in flight.

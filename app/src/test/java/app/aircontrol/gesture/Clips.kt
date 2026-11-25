@@ -14,6 +14,8 @@ class Clip(val device: String, val name: String, val frames: List<FrameObservati
     val negative: Boolean get() = group == "neg"
     val durationMs: Long get() = if (frames.isEmpty()) 0 else frames.last().timestampMs - frames.first().timestampMs
     val label: String get() = "$device/$name"
+    /** A degraded copy made by `extract-clips.py --augment` (folder `<device>~<variant>`). */
+    val degraded: Boolean get() = '~' in device
 }
 
 /**
@@ -157,7 +159,7 @@ object ClipRunner {
                 // Arm clips start disarmed; all others are replayed armed, as if 🤟 was held before.
                 engine.process(f.copy(hands = emptyList()))
                 if (!clip.name.startsWith("arm_")) engine.armNow()
-                calibrate?.let { engine.startCalibration(it) }
+                calibrate?.let { engine.startCalibration(it, readyMs = 0L) }
                 started = true
             }
             engine.process(f)

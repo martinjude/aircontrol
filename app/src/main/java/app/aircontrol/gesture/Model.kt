@@ -110,6 +110,13 @@ enum class TouchSource { TAP, PUSH }
 /** HAND = the comfortable palm angle, PUSH = the air plane at 5 screen points, ATTENTION = gaze on the screen. */
 enum class CalibrationKind { HAND, PUSH, ATTENTION }
 
+/**
+ * Where a calibration step is: [READY] = the instruction is shown and nothing is measured yet
+ * (a countdown), [HOLD] = measuring while the hand (or gaze) holds still, [PUSH] = measuring the
+ * push toward the screen (air plane), [STEP_DONE] = a short pause after an air-plane point.
+ */
+enum class CalPhase { READY, HOLD, PUSH, STEP_DONE }
+
 /** Events produced by [GestureEngine]. Coordinates are normalized to the screen (0..1). */
 sealed interface ControlEvent {
     /** Progress of holding the arm/disarm sign; 0 means the hold was abandoned. */
@@ -156,9 +163,11 @@ sealed interface ControlEvent {
     /** A tap or push was not accepted; for the preview / tuning only. */
     data class ClickRejected(val reason: String) : ControlEvent
     /**
-     * A calibration step: [message] tells the user what to do, [progress] 0..1 within the step,
+     * A calibration step: [message] tells the user what to do, [progress] 0..1 over the whole calibration,
      * ([targetX], [targetY]) where to point (normalized screen, -1 = none).
-     * When [done], [result] holds the measured values or is null if it failed.
+     * [phase] and [countdownMs] (time left in [CalPhase.READY]); [step] of [stepCount] points (air plane);
+     * [sequenceIndex] of [sequenceSize] when several calibrations run one after the other.
+     * When [done], [result] holds the measured values or is null if it failed or was cancelled.
      */
     data class Calibration(
         val kind: CalibrationKind,
@@ -169,6 +178,11 @@ sealed interface ControlEvent {
         val result: FloatArray? = null,
         val targetX: Float = -1f,
         val targetY: Float = -1f,
+        val phase: CalPhase = CalPhase.HOLD,
+        val countdownMs: Long = 0L,
+        val stepCount: Int = 1,
+        val sequenceIndex: Int = 0,
+        val sequenceSize: Int = 1,
     ) : ControlEvent
 }
 

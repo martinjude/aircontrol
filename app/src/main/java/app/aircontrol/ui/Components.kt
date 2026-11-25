@@ -58,14 +58,14 @@ fun PageTitle(text: String, subtitle: String? = null, logo: Boolean = false) {
     }
 }
 
-/** The "air" mark in the muted text colour. */
+/** The pinch mark in the muted text colour. */
 @Composable
 fun AirLogo(modifier: Modifier = Modifier, tint: Color = AirColors.Muted, height: Dp = 16.dp) {
     Icon(
         painterResource(R.drawable.ic_logo_mark),
         contentDescription = "AirControl",
         tint = tint,
-        modifier = modifier.height(height).aspectRatio(476f / 231f),
+        modifier = modifier.height(height).aspectRatio(393f / 334f),
     )
 }
 

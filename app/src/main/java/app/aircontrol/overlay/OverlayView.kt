@@ -18,6 +18,9 @@ import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.SweepGradient
 import android.graphics.Typeface
+import android.text.Layout
+import android.text.StaticLayout
+import android.text.TextPaint
 import androidx.core.content.res.ResourcesCompat
 import app.aircontrol.R
 import android.os.Build
@@ -25,6 +28,7 @@ import android.os.SystemClock
 import android.view.RoundedCorner
 import android.view.View
 import android.view.WindowInsets
+import app.aircontrol.gesture.CalPhase
 import app.aircontrol.gesture.CalibrationKind
 import app.aircontrol.gesture.ControlEvent
 import app.aircontrol.gesture.DisarmReason
@@ -41,15 +45,20 @@ import app.aircontrol.settings.TrackingView
 import app.aircontrol.ui.Palette
 import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.ceil
+import kotlin.math.cos
 import kotlin.math.exp
 import kotlin.math.hypot
 import kotlin.math.min
 import kotlin.math.sin
 
 /**
- * Full-screen, non-touchable overlay: glow border while armed, a warm shade when the palm turns
- * away, the live pointer (confidence, gaze, finger closing, air-push and touch states), tap ripples, swipe chevrons, hold rings, status pill, calibration
- * prompts and the tracking view. Event coordinates are normalized (0..1).
+ * Full-screen, non-touchable overlay: the glow border (charging while 🤟 is held, a lap when control
+ * turns on, breathing while on, dimmed while no hand is seen, draining when it turns off), a warm shade
+ * when the palm turns away, the live pointer (confidence, gaze, finger closing, air-push depth, edge,
+ * blocked and touch states), tap ripples, swipe chevrons, hold rings, the status pill, the calibration
+ * card and targets, and the tracking panel (movable with [PreviewHandle], see-through).
+ * Event coordinates are normalized (0..1).
  */
 class OverlayView(context: Context) : View(context) {
 
@@ -71,6 +80,17 @@ class OverlayView(context: Context) : View(context) {
         set(value) { field = value; invalidate() }
     var showLog = true
         set(value) { field = value; invalidate() }
+    /** The tracking panel's centre, normalized (-1 = the default bottom-right corner), and its opacity. */
+    var previewX = -1f
+        set(value) { field = value; invalidate() }
+    var previewY = -1f
+        set(value) { field = value; invalidate() }
+    var previewOpacity = 0.7f
+        set(value) { field = value; invalidate() }
+    /** Auto-off without a hand, for the "turning off in" countdown. */
+    var autoDisarmMs = 20_000L
+    /** The tracking panel's bounds on screen whenever they change; null once it is hidden (for the drag handle). */
+    var onPanelRect: ((RectF?) -> Unit)? = null
     /** Whether air push is on (depth gauge, push glow). */
     var pushEnabled = true
     var trackingState: TrackingState? = null
@@ -94,7 +114,8 @@ class OverlayView(context: Context) : View(context) {
     val isIdle: Boolean
         get() = armedTarget == 0f && armedLevel < 0.001f && pointerAlpha < 0.001f && ripples.isEmpty() &&
             swipeDir == null && bindLabel == null && flashLabel == null && pillAlpha < 0.001f && now() > pillUntil &&
-            calKind == null && calDoneUntil < now()
+            calKind == null && calDoneUntil < now() && armCharge == 0f && armChargeShown < 0.001f &&
+            now() > drainStart + DRAIN_MS && now() > ghostStart + GHOST_MS
 
     private val density = resources.displayMetrics.density
     private fun dp(v: Float) = v * density
@@ -107,6 +128,19 @@ class OverlayView(context: Context) : View(context) {
     private var armedTarget = 0f
     private var armedLevel = 0f
     private var armedAtMs = 0L
+    /** Progress of holding 🤟 to arm / to disarm (0 = not held). */
+    private var armCharge = 0f
+    private var armChargeShown = 0f
+    private var disarmCharge = 0f
+    private var drainStart = 0L
+    private var drainFrom = 0f
+    private var pulseAt = 0L
+    private var breathePhase = 0f
+    /** When the hand went out of view while armed (0 = it is seen). */
+    private var lostSince = 0L
+    private var lostPill = false
+    private val wedge = Path()
+    private val wedgeOval = RectF()
     private var sweep: SweepGradient? = null
     private val shaderMatrix = Matrix()
     // The glow shape (soft falloff from the screen edge) is rendered once into an alpha mask; each
@@ -143,6 +177,12 @@ class OverlayView(context: Context) : View(context) {
     private var touchStartY = 0f
     private var moved = false
     private val trail = ArrayDeque<Pair<Float, Float>>()
+    private var pointerShownAt = 0L
+    private var edge = 0
+    private var edgeSince = 0L
+    private var ghostX = 0f
+    private var ghostY = 0f
+    private var ghostStart = 0L
 
     private class Ripple(val u: Float, val v: Float, val start: Long, val big: Boolean)
     private val ripples = mutableListOf<Ripple>()
@@ -166,6 +206,17 @@ class OverlayView(context: Context) : View(context) {
     private var calX = -1f
     private var calY = -1f
     private var calDoneUntil = 0L
+    private var calPhase = CalPhase.HOLD
+    private var calPhaseAt = 0L
+    private var calCountdown = 0L
+    private var calReadyTotal = 1L
+    private var calStep = 0
+    private var calStepCount = 1
+    private var calSeq = 0
+    private var calSeqSize = 1
+    private var calMessage = ""
+    private var calLayout: StaticLayout? = null
+    private var calLayoutKey = ""
 
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
     private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -210,18 +261,33 @@ class OverlayView(context: Context) : View(context) {
         val t = now()
         when (e) {
             is ControlEvent.ArmProgress -> if (e.progress > 0f) {
+                if (e.disarming) disarmCharge = e.progress else armCharge = e.progress
                 showPill(if (e.disarming) "🤟  Keep holding to turn off" else "🤟  Keep holding to take control", e.progress, 400)
             } else {
+                armCharge = 0f
+                disarmCharge = 0f
                 pillUntil = t
             }
             ControlEvent.Armed -> {
                 armedTarget = 1f
                 armedAtMs = t
+                // The charge has drawn the whole border: the glow continues from there.
+                armedLevel = armedLevel.coerceAtLeast(CHARGE_LEVEL)
+                armCharge = 0f
+                armChargeShown = 0f
+                disarmCharge = 0f
+                lostSince = 0L
                 showPill("🤟  Gesture control on", -1f, 2200)
                 logLine("armed", Palette.TEXT)
             }
             is ControlEvent.Disarmed -> {
                 armedTarget = 0f
+                drainFrom = armedLevel.coerceAtLeast(0.3f) * (1f - 0.4f * disarmCharge)
+                drainStart = t
+                armedLevel = 0f
+                disarmCharge = 0f
+                lostSince = 0L
+                lostPill = false
                 pointerWanted = false
                 touching = false
                 closing = 0f
@@ -234,6 +300,20 @@ class OverlayView(context: Context) : View(context) {
                 if (e.visible && (!pointerWanted || px < 0f)) {
                     px = e.x * width; py = e.y * height
                 }
+                if (e.visible && !pointerWanted) {
+                    pointerShownAt = t
+                    if (lostPill) { pillUntil = t; lostPill = false }
+                }
+                if (e.visible) {
+                    lostSince = 0L
+                } else if (pointerWanted && armedTarget > 0f) {
+                    // The hand went out of view: a ghost ring stays where it was, the glow dims.
+                    lostSince = t
+                    ghostX = px; ghostY = py; ghostStart = t
+                }
+                val newEdge = if (e.visible) e.edge else 0
+                if (newEdge != 0 && edge == 0) edgeSince = t
+                edge = newEdge
                 targetU = e.x; targetV = e.y
                 pointerWanted = e.visible
                 if (e.touching && !touching) {
@@ -258,6 +338,7 @@ class OverlayView(context: Context) : View(context) {
             }
             is ControlEvent.Tap -> {
                 ripples += Ripple(e.x, e.y, t, big = true)
+                pulseAt = t
                 logLine(if (e.click) "click  (%.0f%%, %.0f%%)".format(e.x * 100, e.y * 100) else "push tap", Palette.OK)
             }
             is ControlEvent.TouchDown -> {
@@ -272,6 +353,7 @@ class OverlayView(context: Context) : View(context) {
             }
             is ControlEvent.Swipe -> {
                 swipeDir = e.dir; swipeStart = t
+                pulseAt = t
                 logLine("swipe ${e.dir.name.lowercase()}", Palette.OK)
             }
             is ControlEvent.ClickRejected -> logLine("✗ ${e.reason}", Palette.WARN)
@@ -282,6 +364,7 @@ class OverlayView(context: Context) : View(context) {
             }
             is ControlEvent.BindFired -> {
                 bindLabel = null
+                pulseAt = t
                 flashLabel = e.label
                 flashStart = t
                 logLine("bind: ${e.label}", Palette.OK)
@@ -293,16 +376,23 @@ class OverlayView(context: Context) : View(context) {
                     showPill((if (e.result != null) "✅  " else "⚠️  ") + e.message, -1f, 1800)
                     logLine(e.message.lowercase(), if (e.result != null) Palette.OK else Palette.WARN)
                 } else {
+                    if (calKind != e.kind || calPhase != e.phase || calStep != e.step) {
+                        calPhaseAt = t
+                        if (e.phase == CalPhase.READY) calReadyTotal = e.countdownMs.coerceAtLeast(1L)
+                    }
                     calKind = e.kind
                     calProgress = e.progress
                     calX = e.targetX
                     calY = e.targetY
-                    val icon = when (e.kind) {
-                        CalibrationKind.HAND -> "✋  "
-                        CalibrationKind.PUSH -> "👉  "
-                        CalibrationKind.ATTENTION -> "👀  "
-                    }
-                    showPill(icon + e.message, e.progress, 600)
+                    calPhase = e.phase
+                    calCountdown = e.countdownMs
+                    calStep = e.step
+                    calStepCount = e.stepCount
+                    calSeq = e.sequenceIndex
+                    calSeqSize = e.sequenceSize
+                    calMessage = e.message
+                    // The calibration card replaces the pill.
+                    pillUntil = t
                 }
             }
         }
@@ -342,20 +432,22 @@ class OverlayView(context: Context) : View(context) {
         val t = now()
         val dt = if (lastDrawMs == 0L) 16f else (t - lastDrawMs).coerceIn(1L, 100L).toFloat()
         lastDrawMs = t
+        panelDrawn = false
         var animating = false
         var glowOnly = false
 
-        armedLevel = approach(armedLevel, armedTarget, dt / 320f)
-        if (armedLevel > 0.001f) {
-            // While the palm angle warning shows, the normal glow steps back so the warning reads clearly.
-            drawGlow(canvas, armedLevel * (1f - 0.75f * angleShown), t)
-            glowOnly = armedLevel == armedTarget && t - armedAtMs > 600
-        }
+        if (drawGlowLayers(canvas, t, dt)) animating = true
+        glowOnly = armedLevel > 0.001f && armedLevel == armedTarget
         // Palm turned away from the calibrated angle: a warm shade on the screen edges.
         angleShown += ((if (pointerWanted && armedTarget > 0f) angleWarn else 0f) - angleShown) * (1f - exp(-dt / 120f))
         if (angleShown > 0.03f) {
             drawWarnShade(canvas, angleShown)
             animating = true
+        }
+
+        // The tracking panel sits under the cursor, the calibration card and the pills.
+        if (trackingShown) {
+            if (drawTracking(canvas, t, dt)) animating = true
         }
 
         val pointerTarget = if (pointerWanted && armedTarget > 0f) 1f else 0f
@@ -377,18 +469,24 @@ class OverlayView(context: Context) : View(context) {
             drawPushGlow(canvas, px, py, pointerAlpha)
             drawTrail(canvas)
             drawPointer(canvas, px, py, pointerAlpha)
-            if (touching) animating = true
+            if (touching || t - pointerShownAt < POP_MS || edge != 0) animating = true
         }
 
+        if (drawGhost(canvas, t)) animating = true
         if (drawRipples(canvas, t)) animating = true
         if (drawSwipe(canvas, t)) animating = true
         if (drawSign(canvas, t)) animating = true
-        when {
-            calKind == CalibrationKind.ATTENTION -> drawCalTarget(canvas, width / 2f, height / 2f)
-            calKind == CalibrationKind.PUSH && calX >= 0f -> drawCalTarget(canvas, calX * width, calY * height)
+        calKind?.let { kind ->
+            when {
+                kind == CalibrationKind.ATTENTION -> drawCalTarget(canvas, width / 2f, height / 2f, t)
+                kind == CalibrationKind.PUSH && calX >= 0f -> drawCalTarget(canvas, calX * width, calY * height, t)
+            }
+            drawCalCard(canvas, kind)
+            animating = true
         }
+        updateLostPill(t)
         if (drawPill(canvas, t, dt)) animating = true
-        if (trackingShown) drawTracking(canvas, t)
+        reportPanel()
 
         when {
             animating -> postInvalidateOnAnimation()
@@ -397,10 +495,71 @@ class OverlayView(context: Context) : View(context) {
         }
     }
 
-    private fun drawGlow(c: Canvas, level: Float, t: Long) {
+    /**
+     * The glow, in layers that all reuse the pre-rendered mask (only clips and alpha change per frame):
+     * - holding 🤟: the border fills from the bottom centre up both sides as the hold progresses;
+     * - turning on: two bright comets run up both sides and meet at the top, over a short flash;
+     * - on: a slow breathing glow, brighter for a moment after each action, dimmer and slower while
+     *   no hand is seen, closing toward the bottom while 🤟 is held to turn off;
+     * - turning off: the glow drains down both sides to the bottom.
+     * Returns whether a transition is running (needs the next frame).
+     */
+    private fun drawGlowLayers(c: Canvas, t: Long, dt: Float): Boolean {
+        var animating = false
+        armedLevel = approach(armedLevel, armedTarget, dt / 320f)
+        if (armedLevel != armedTarget) animating = true
+        val lost = armedTarget > 0f && lostSince > 0L
+        val lostK = if (lost) TapGate.smoothstep((t - lostSince).toFloat(), 600f, 1100f) else 0f
+        breathePhase = (breathePhase + dt / (if (lost) 5200f else 3200f) * 2f * PI.toFloat()) % (2f * PI.toFloat())
+        armChargeShown += ((if (armedTarget == 0f) armCharge else 0f) - armChargeShown) * (1f - exp(-dt / 50f))
+        if (abs(armChargeShown - armCharge) > 0.005f || armCharge > 0f) animating = true
+        val drainE = (t - drainStart) / DRAIN_MS.toFloat()
+        val charging = armChargeShown > 0.004f
+        if (armedLevel < 0.001f && !charging && drainE >= 1f) return animating
+        if (!prepareGlow(t)) return animating
+
+        if (charging) {
+            val half = 180f * armChargeShown
+            glowBands(c, CHARGE_LEVEL, 90f, half)
+            // A brighter head where the charge has reached.
+            glowBands(c, 0.45f, 90f + half - 7f, 7f)
+            glowBands(c, 0.45f, 90f - half + 7f, 7f)
+        }
+        if (armedLevel > 0.001f) {
+            val breathe = 0.88f + 0.12f * sin(breathePhase)
+            val pe = (t - pulseAt) / PULSE_MS.toFloat()
+            val pulse = if (pe in 0f..1f) 0.35f * (1f - pe) * (1f - pe) else 0f
+            if (pulse > 0f) animating = true
+            val level = armedLevel * (1f - 0.75f * angleShown) * (1f - 0.65f * lostK) * (1f - 0.4f * disarmCharge)
+            glowBands(c, (level * breathe + pulse * armedLevel).coerceAtMost(1f), 90f, 180f * (1f - 0.85f * disarmCharge))
+            val flash = 0.8f * exp(-(t - armedAtMs) / 260f)
+            if (flash > 0.02f) glowBands(c, armedLevel * flash)
+            val le = (t - armedAtMs) / LAP_MS.toFloat()
+            if (le < 1f) {
+                val th = 180f * smooth(le)
+                val a = 0.9f * (1f - 0.5f * le)
+                glowBands(c, a, 90f + th, 20f)
+                glowBands(c, a, 90f - th, 20f)
+                animating = true
+            }
+        }
+        if (drainE < 1f) {
+            glowBands(c, drainFrom * (1f - 0.5f * drainE), 90f, 180f * (1f - drainE * drainE))
+            animating = true
+        }
+        return animating
+    }
+
+    private fun smooth(x: Float): Float {
+        val k = x.coerceIn(0f, 1f)
+        return k * k * (3f - 2f * k)
+    }
+
+    /** Sets up the glow shader (mask and rotating colour sweep); false while the view has no size. */
+    private fun prepareGlow(t: Long): Boolean {
         val w = width
         val h = height
-        if (w == 0 || h == 0) return
+        if (w == 0 || h == 0) return false
         val sh = sweep ?: SweepGradient(w / 2f, h / 2f, colors, null).also { sweep = it; glowShader = null }
         val mask = glowMask ?: buildGlowMask(w, h).also { glowMask = it; glowShader = null }
         val shader = glowShader ?: ComposeShader(
@@ -410,20 +569,45 @@ class OverlayView(context: Context) : View(context) {
         shaderMatrix.setRotate((sec * 40f) % 360f, w / 2f, h / 2f)
         sh.setLocalMatrix(shaderMatrix)
         glowPaint.shader = shader
-        val breathe = 0.88f + 0.12f * sin(sec * 2f * PI.toFloat() / 3.2f)
-        val flash = 0.8f * exp(-(t - armedAtMs) / 260f)
+        return true
+    }
+
+    /**
+     * The glow's edge bands at [alpha]. With [halfDeg] < 180 only the part inside a wedge from the
+     * screen centre, [halfDeg] either side of [centerDeg] (0 = right, 90 = bottom, clockwise).
+     */
+    private fun glowBands(c: Canvas, alpha: Float, centerDeg: Float = 90f, halfDeg: Float = 180f) {
+        if (alpha <= 0.004f || halfDeg <= 0.5f) return
+        val fw = width.toFloat()
+        val fh = height.toFloat()
         val band = glowBand
-        val fw = w.toFloat()
-        val fh = h.toFloat()
-        fun bands(alpha: Float) {
-            glowPaint.alpha = (255f * alpha).toInt().coerceIn(0, 255)
-            c.drawRect(0f, 0f, fw, band, glowPaint)
-            c.drawRect(0f, fh - band, fw, fh, glowPaint)
-            c.drawRect(0f, band, band, fh - band, glowPaint)
-            c.drawRect(fw - band, band, fw, fh - band, glowPaint)
+        var saved = -1
+        if (halfDeg < 180f) {
+            saved = c.save()
+            val r = hypot(fw, fh)
+            wedge.reset()
+            wedge.moveTo(fw / 2f, fh / 2f)
+            wedgeOval.set(fw / 2f - r, fh / 2f - r, fw / 2f + r, fh / 2f + r)
+            wedge.arcTo(wedgeOval, centerDeg - halfDeg, 2f * halfDeg, false)
+            wedge.close()
+            c.clipPath(wedge)
         }
-        bands(level * breathe)
-        if (flash > 0.02f) bands(level * flash)
+        glowPaint.alpha = (255f * alpha).toInt().coerceIn(0, 255)
+        c.drawRect(0f, 0f, fw, band, glowPaint)
+        c.drawRect(0f, fh - band, fw, fh, glowPaint)
+        c.drawRect(0f, band, band, fh - band, glowPaint)
+        c.drawRect(fw - band, band, fw, fh - band, glowPaint)
+        if (saved >= 0) c.restoreToCount(saved)
+    }
+
+    /** No hand for a while when control is on: say so, with the time left before it turns off. */
+    private fun updateLostPill(t: Long) {
+        if (armedTarget == 0f || lostSince == 0L || calKind != null) return
+        val gone = t - lostSince
+        if (gone < LOST_PILL_AFTER_MS) return
+        val left = ceil((autoDisarmMs - gone - HAND_LOST_GRACE_MS) / 1000f).toInt().coerceAtLeast(1)
+        showPill("✋  Show your hand · turning off in $left s", -1f, 300)
+        lostPill = true
     }
 
     /** The glow mask filled with a warm warning colour, orange shifting to red as [level] grows. */
@@ -533,11 +717,22 @@ class OverlayView(context: Context) : View(context) {
             return
         }
 
-        // Ring: white when the pointer is trusted, shifting to orange/red as the palm turns away;
-        // it fades with low confidence and while actions pause after a pose.
-        val r = dp(14f)
-        val ringColor = if (angleShown > 0.05f) blend(Color.WHITE, blend(Palette.WARN, Palette.BAD, angleShown), (angleShown * 1.5f).coerceAtMost(1f)) else Color.WHITE
-        val ringAlpha = a * (0.35f + 0.65f * confidenceShown) * (if (cooldown) 0.5f else 1f)
+        // Ring: white when the pointer is trusted, shifting to orange/red as the palm turns away; red
+        // with a slash when taps are blocked by the angle; dashed grey while actions pause after a pose.
+        // It pops in when the hand appears and tightens as thumb and index close.
+        val t = now()
+        val pe = ((t - pointerShownAt) / POP_MS.toFloat()).coerceIn(0f, 1f)
+        val pop = 0.6f + 0.4f * (1f - (1f - pe) * (1f - pe) * (1f - pe))
+        val k = closingShown
+        val r = dp(14f) * pop * (1f - 0.28f * k)
+        val blocked = angleShown > 0.9f
+        val ringColor = when {
+            blocked -> Palette.BAD
+            angleShown > 0.05f -> blend(Color.WHITE, blend(Palette.WARN, Palette.BAD, angleShown), (angleShown * 1.5f).coerceAtMost(1f))
+            cooldown -> Palette.TEXT_3
+            else -> Color.WHITE
+        }
+        val ringAlpha = a * (0.35f + 0.65f * confidenceShown) * (if (cooldown) 0.7f else 1f)
         stroke.strokeWidth = dp(5.5f)
         stroke.color = Color.BLACK
         stroke.alpha = (60 * a).toInt()
@@ -545,10 +740,20 @@ class OverlayView(context: Context) : View(context) {
         stroke.strokeWidth = dp(2.5f)
         stroke.color = ringColor
         stroke.alpha = (255 * ringAlpha).toInt()
+        if (cooldown && !blocked) stroke.pathEffect = ringDash
         c.drawCircle(x, y, r, stroke)
-        fill.color = accent
-        fill.alpha = ai
-        c.drawCircle(x, y, dp(3.5f), fill)
+        stroke.pathEffect = null
+        // The centre grows as the fingers close: contact (a solid dot) is the end of the same motion.
+        fill.color = if (blocked) Palette.BAD else accent
+        fill.alpha = (ai * (0.85f + 0.15f * k)).toInt()
+        c.drawCircle(x, y, dp(3.5f) + dp(4.5f) * k, fill)
+        if (blocked) {
+            val d = r * 0.72f
+            stroke.strokeWidth = dp(2.5f)
+            stroke.color = Palette.BAD
+            stroke.alpha = ai
+            c.drawLine(x - d, y + d, x + d, y - d, stroke)
+        }
         // Confidence below ~90 %: a thin arc outside the ring shows how much is left.
         if (confidenceShown < 0.9f) {
             val cr = r + dp(6f)
@@ -569,20 +774,75 @@ class OverlayView(context: Context) : View(context) {
         }
 
         // Thumb and index closing: two arcs close in on the ring.
-        val k = closingShown
         if (k > 0.05f) {
             val pr = r + dp(4f) + dp(12f) * (1f - k)
             rect.set(x - pr, y - pr, x + pr, y + pr)
             stroke.strokeWidth = dp(3f)
-            stroke.color = if (cooldown) Palette.TEXT_3 else accent
+            stroke.color = if (cooldown || blocked) Palette.TEXT_3 else accent
             stroke.alpha = (ai * (0.35f + 0.65f * k)).toInt()
             c.drawArc(rect, 180f - 35f, 70f, false, stroke)
             c.drawArc(rect, -35f, 70f, false, stroke)
         }
+        // Air push: a ring closes in on the cursor as the hand nears the plane.
+        if (pushEnabled && pushShown > PUSH_FEEDBACK_FROM) {
+            val pk = TapGate.smoothstep(pushShown, PUSH_FEEDBACK_FROM, 1f)
+            val ar = r * (1f + 1.2f * (1f - pk)) + dp(3f)
+            stroke.strokeWidth = dp(1.5f) + dp(1f) * pk
+            stroke.color = if (cooldown || blocked) Palette.TEXT_3 else accent
+            stroke.alpha = (ai * (0.3f + 0.6f * pk)).toInt()
+            c.drawCircle(x, y, ar, stroke)
+        }
+        drawEdgeHint(c, x, y, r, a)
+        val edgeHeld = edge != 0 && t - edgeSince > EDGE_CHIP_MS
         when {
-            angleShown > 0.6f -> drawChip(c, "Turn your palm to the camera", x, y + dp(38f), a)
+            blocked || angleShown > 0.6f -> drawChip(c, "Turn your palm to the camera", x, y + dp(38f), a)
+            edgeHeld -> drawChip(c, "Move your hand toward the centre", x, y + dp(38f), a)
             cooldown && k > 0.5f -> drawChip(c, "Wait a moment", x, y + dp(38f), a)
         }
+    }
+
+    /**
+     * The palm presses on an edge of the hand-safe region (the cursor can't go further there and the
+     * fingers may leave the camera view): a warm arc on that side of the ring with a chevron pointing back in.
+     */
+    private fun drawEdgeHint(c: Canvas, x: Float, y: Float, r: Float, a: Float) {
+        if (edge == 0) return
+        val er = r + dp(9f)
+        rect.set(x - er, y - er, x + er, y + er)
+        for ((bit, deg) in EDGE_ANGLES) {
+            if (edge and bit == 0) continue
+            stroke.strokeWidth = dp(3f)
+            stroke.color = Palette.WARN
+            stroke.alpha = (230 * a).toInt()
+            c.drawArc(rect, deg - 25f, 50f, false, stroke)
+            // Chevron outside the arc, pointing toward the ring.
+            val rad = Math.toRadians(deg.toDouble())
+            val ux = cos(rad).toFloat()
+            val uy = sin(rad).toFloat()
+            val tipX = x + ux * (er + dp(5f))
+            val tipY = y + uy * (er + dp(5f))
+            val bx = x + ux * (er + dp(11f))
+            val by = y + uy * (er + dp(11f))
+            path.reset()
+            path.moveTo(bx - uy * dp(5f), by + ux * dp(5f))
+            path.lineTo(tipX, tipY)
+            path.lineTo(bx + uy * dp(5f), by - ux * dp(5f))
+            stroke.strokeWidth = dp(2.5f)
+            c.drawPath(path, stroke)
+        }
+    }
+
+    /** Where the hand was when it went out of view: a dashed ring that fades. */
+    private fun drawGhost(c: Canvas, t: Long): Boolean {
+        val e = (t - ghostStart) / GHOST_MS.toFloat()
+        if (e >= 1f || e < 0f || pointerAlpha > 0.5f) return false
+        stroke.pathEffect = ringDash
+        stroke.strokeWidth = dp(2f)
+        stroke.color = Color.WHITE
+        stroke.alpha = (150 * (1f - e)).toInt()
+        c.drawCircle(ghostX, ghostY, dp(14f) + dp(4f) * e, stroke)
+        stroke.pathEffect = null
+        return true
     }
 
     private fun drawChip(c: Canvas, msg: String, cx: Float, cy: Float, a: Float) {
@@ -695,21 +955,180 @@ class OverlayView(context: Context) : View(context) {
         return animating
     }
 
-    /** Where to look (attention) or point (air push) during a calibration: a ring filling with progress. */
-    private fun drawCalTarget(c: Canvas, cx: Float, cy: Float) {
+    /**
+     * Where to look (gaze) or point (air plane) during a calibration. Faint and gently pulsing during the
+     * countdown, a ring filling with the step's progress while measuring (with a ring closing in while
+     * pushing), and a check mark once an air-plane point is done.
+     */
+    private fun drawCalTarget(c: Canvas, cx: Float, cy: Float, t: Long) {
+        val since = (t - calPhaseAt).toFloat()
+        if (calPhase == CalPhase.STEP_DONE) {
+            val e = (since / 260f).coerceIn(0f, 1f)
+            val back = 1f + 0.18f * sin(e * PI.toFloat())
+            val rr = dp(26f) * (0.7f + 0.3f * e) * back
+            fill.color = accent
+            fill.alpha = 255
+            c.drawCircle(cx, cy, rr, fill)
+            path.reset()
+            path.moveTo(cx - rr * 0.38f, cy + rr * 0.02f)
+            path.lineTo(cx - rr * 0.1f, cy + rr * 0.3f)
+            path.lineTo(cx + rr * 0.4f, cy - rr * 0.28f)
+            stroke.pathEffect = null
+            stroke.strokeWidth = dp(3.5f)
+            stroke.color = Palette.ON_ACCENT
+            stroke.alpha = 255
+            c.drawPath(path, stroke)
+            return
+        }
+        val ready = calPhase == CalPhase.READY
+        val a = if (ready) 0.55f else 1f
+        if (ready) {
+            // Gentle pulse: "this is where you'll point".
+            val pr = dp(34f) + dp(8f) * (0.5f + 0.5f * sin(since / 1000f * 2f * PI.toFloat()))
+            stroke.strokeWidth = dp(1.5f)
+            stroke.color = accent
+            stroke.alpha = 90
+            c.drawCircle(cx, cy, pr, stroke)
+        }
         fill.color = Palette.SURFACE
-        fill.alpha = 230
+        fill.alpha = (230 * a).toInt()
         c.drawCircle(cx, cy, dp(30f), fill)
         rect.set(cx - dp(22f), cy - dp(22f), cx + dp(22f), cy + dp(22f))
         stroke.strokeWidth = dp(3f)
         stroke.color = Palette.HAIRLINE
         stroke.alpha = 255
         c.drawArc(rect, 0f, 360f, false, stroke)
-        stroke.color = accent
-        c.drawArc(rect, -90f, 360f * calProgress, false, stroke)
+        if (!ready) {
+            val stepProgress = if (calKind == CalibrationKind.PUSH) calProgress * calStepCount - calStep else calProgress
+            stroke.color = accent
+            c.drawArc(rect, -90f, 360f * stepProgress.coerceIn(0f, 1f), false, stroke)
+        }
+        if (calPhase == CalPhase.PUSH) {
+            val e = (since % 900f) / 900f
+            stroke.strokeWidth = dp(2f)
+            stroke.color = accent
+            stroke.alpha = (200 * (1f - e)).toInt()
+            c.drawCircle(cx, cy, dp(52f) - dp(26f) * e, stroke)
+        }
         fill.color = accent
-        fill.alpha = 255
+        fill.alpha = (255 * a).toInt()
         c.drawCircle(cx, cy, dp(5f), fill)
+    }
+
+    private val calText = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Palette.TEXT
+        textSize = dp(16f)
+        typeface = geistMedium
+    }
+    private val calTitle = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Palette.TEXT
+        textSize = dp(17f)
+        typeface = geistMedium
+    }
+
+    /**
+     * The calibration card: which calibration (and which of several), what to do in plain words, the
+     * points done so far, and a countdown before anything is measured. It sits where it can't cover the target.
+     */
+    private fun drawCalCard(c: Canvas, kind: CalibrationKind) {
+        val pad = dp(18f)
+        val w = min(width - dp(32f), dp(360f))
+        val inner = w - 2 * pad
+        val ready = calPhase == CalPhase.READY
+        val ringR = dp(17f)
+        val textW = (inner - if (ready) ringR * 2 + dp(12f) else 0f).toInt().coerceAtLeast(1)
+        val key = "$calMessage|$textW"
+        val layout = calLayout?.takeIf { calLayoutKey == key }
+            ?: StaticLayout.Builder.obtain(calMessage, 0, calMessage.length, calText, textW)
+                .setAlignment(Layout.Alignment.ALIGN_NORMAL).setLineSpacing(dp(2f), 1f).setMaxLines(4).build()
+                .also { calLayout = it; calLayoutKey = key }
+        val headerH = dp(16f)
+        val titleH = dp(24f)
+        val dotsH = if (calStepCount > 1) dp(22f) else 0f
+        val h = pad + headerH + dp(4f) + titleH + dp(8f) + layout.height + dp(14f) + dotsH + dp(3f) + pad
+        val cy = when (kind) {
+            CalibrationKind.HAND -> height / 2f
+            CalibrationKind.ATTENTION -> height / 2f + dp(56f) + h / 2f
+            CalibrationKind.PUSH -> if (calY in 0f..0.5f) height * 0.72f else height * 0.28f
+        }
+        val top = (cy - h / 2f).coerceIn(topInset + dp(12f), (height - bottomInset - dp(12f) - h).coerceAtLeast(topInset + dp(12f)))
+        val left = (width - w) / 2f
+        rect.set(left, top, left + w, top + h)
+        fill.color = Palette.SURFACE
+        fill.alpha = 245
+        c.drawRoundRect(rect, dp(16f), dp(16f), fill)
+        stroke.pathEffect = null
+        stroke.strokeWidth = dp(1f)
+        stroke.color = Palette.HAIRLINE
+        stroke.alpha = 255
+        c.drawRoundRect(rect, dp(16f), dp(16f), stroke)
+
+        var y = top + pad
+        label.color = Palette.TEXT_2
+        label.alpha = 255
+        val header = if (calSeqSize > 1) "Calibration · ${calSeq + 1} of $calSeqSize" else "Calibration"
+        c.drawText(header, left + pad, y + headerH * 0.75f, label)
+        if (calStepCount > 1) {
+            val pt = "Point ${(calStep + 1).coerceAtMost(calStepCount)} of $calStepCount"
+            c.drawText(pt, left + w - pad - label.measureText(pt), y + headerH * 0.75f, label)
+        }
+        y += headerH + dp(4f)
+        val (emoji, name) = when (kind) {
+            CalibrationKind.HAND -> "✋" to "Hand angle"
+            CalibrationKind.PUSH -> "👉" to "Air plane"
+            CalibrationKind.ATTENTION -> "👀" to "Gaze"
+        }
+        calTitle.alpha = 255
+        c.drawText("$emoji  $name", left + pad, y + titleH * 0.78f, calTitle)
+        y += titleH + dp(8f)
+        c.save()
+        c.translate(left + pad, y)
+        layout.draw(c)
+        c.restore()
+        if (ready) {
+            // Countdown ring with the seconds left, beside the instruction.
+            val rcx = left + w - pad - ringR
+            val rcy = y + ringR
+            rect.set(rcx - ringR, rcy - ringR, rcx + ringR, rcy + ringR)
+            stroke.strokeWidth = dp(2.5f)
+            stroke.color = Palette.RAISED
+            c.drawArc(rect, 0f, 360f, false, stroke)
+            stroke.color = accent
+            c.drawArc(rect, -90f, 360f * (calCountdown.toFloat() / calReadyTotal).coerceIn(0f, 1f), false, stroke)
+            val n = ceil(calCountdown / 1000f).toInt().coerceAtLeast(1).toString()
+            text.color = Palette.TEXT
+            text.alpha = 255
+            c.drawText(n, rcx - text.measureText(n) / 2f, rcy - (text.descent() + text.ascent()) / 2f, text)
+        }
+        y += layout.height + dp(14f)
+        if (calStepCount > 1) {
+            // One dot per point: done (filled), current (ring), still to do (faint).
+            val gap = dp(14f)
+            val dotR = dp(4f)
+            var dx = left + pad + dotR
+            for (i in 0 until calStepCount) {
+                when {
+                    i < calStep -> { fill.color = accent; fill.alpha = 255; c.drawCircle(dx, y + dotR, dotR, fill) }
+                    i == calStep -> {
+                        stroke.strokeWidth = dp(1.5f); stroke.color = accent; stroke.alpha = 255
+                        c.drawCircle(dx, y + dotR, dotR, stroke)
+                    }
+                    else -> { fill.color = Palette.RAISED; fill.alpha = 255; c.drawCircle(dx, y + dotR, dotR, fill) }
+                }
+                dx += gap + dotR
+            }
+            y += dotsH
+        }
+        // Overall progress.
+        rect2.set(left + pad, y, left + w - pad, y + dp(3f))
+        fill.color = Palette.RAISED
+        fill.alpha = 255
+        c.drawRoundRect(rect2, dp(1.5f), dp(1.5f), fill)
+        if (calProgress > 0.005f) {
+            rect2.right = rect2.left + (w - 2 * pad) * calProgress.coerceIn(0f, 1f)
+            fill.color = accent
+            c.drawRoundRect(rect2, dp(1.5f), dp(1.5f), fill)
+        }
     }
 
     private fun drawPill(c: Canvas, t: Long, dt: Float): Boolean {
@@ -766,14 +1185,13 @@ class OverlayView(context: Context) : View(context) {
     private var sparkIdx = 0
     private var lastSnapT = Long.MIN_VALUE
     private var lastClickTime = Long.MIN_VALUE
-    private var panelLeft = false
-    private var panelFlipT = 0L
 
     private val small = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         textSize = dp(10f)
         typeface = geistMono
     }
     private val dash = DashPathEffect(floatArrayOf(dp(4f), dp(3f)), 0f)
+    private val ringDash = DashPathEffect(floatArrayOf(dp(5f), dp(4f)), 0f)
     private val rect2 = RectF()
     private val box = RectF()
 
@@ -798,21 +1216,97 @@ class OverlayView(context: Context) : View(context) {
         HandSide.ANY -> "?"
     }
 
-    /** Panel position: a bottom corner, hopping to the other one when the pointer gets under it. */
-    private fun panelLeftFor(w: Float, top: Float, bottom: Float, t: Long): Float {
-        var left = if (panelLeft) dp(12f) else width - w - dp(12f)
-        if (pointerAlpha > 0.1f && px in (left - dp(28f))..(left + w + dp(28f)) &&
-            py in (top - dp(28f))..(bottom + dp(28f)) && t - panelFlipT > 900
-        ) {
-            panelLeft = !panelLeft
-            panelFlipT = t
-            left = if (panelLeft) dp(12f) else width - w - dp(12f)
-        }
-        return left
+    // Panel placement. The panel lets taps through (the window is not touchable); it fades while the
+    // cursor is over it so what is underneath stays visible. [PreviewHandle] moves it.
+    private val panelRect = RectF()
+    private val reportedPanel = RectF()
+    private var panelDrawn = false
+    private var panelReported = false
+    private var panelFade = 1f
+    private var panelLayer = -1
+    private var dragCx = Float.NaN
+    private var dragCy = Float.NaN
+
+    /** Moves the panel's centre to ([cx], [cy]) in pixels while it is dragged. */
+    fun dragPanelTo(cx: Float, cy: Float) {
+        dragCx = cx
+        dragCy = cy
+        invalidate()
     }
 
-    private fun drawTracking(c: Canvas, t: Long) {
+    /** Ends a drag: returns where the panel's centre now is, normalized (kept on screen). */
+    fun dropPanel(): Pair<Float, Float> {
+        dragCx = Float.NaN
+        dragCy = Float.NaN
+        if (width == 0 || height == 0 || panelRect.isEmpty) return previewX to previewY
+        val u = (panelRect.centerX() / width).coerceIn(0f, 1f)
+        val v = (panelRect.centerY() / height).coerceIn(0f, 1f)
+        previewX = u
+        previewY = v
+        return u to v
+    }
+
+    /** Puts the panel back in its default corner. */
+    fun resetPanel() {
+        dragCx = Float.NaN
+        dragCy = Float.NaN
+        previewX = -1f
+        previewY = -1f
+    }
+
+    /** The panel bounds, or null while it is hidden. */
+    fun currentPanelRect(): RectF? = if (panelReported) RectF(reportedPanel) else null
+
+    /** Top-left of a [w] × [h] panel: where it is dragged or was put, else the bottom-right corner; always on screen. */
+    private fun panelOrigin(w: Float, h: Float): Pair<Float, Float> {
+        val m = dp(8f)
+        val minL = m
+        val maxL = (width - w - m).coerceAtLeast(minL)
+        val minT = topInset + dp(PANEL_TOP_ROOM_DP)
+        val maxT = (height - bottomInset - h - m).coerceAtLeast(minT)
+        val (cx, cy) = when {
+            !dragCx.isNaN() -> dragCx to dragCy
+            previewX >= 0f && previewY >= 0f -> previewX * width to previewY * height
+            else -> return (width - w - dp(12f)).coerceIn(minL, maxL) to (height - bottomInset - dp(12f) - h).coerceIn(minT, maxT)
+        }
+        return (cx - w / 2f).coerceIn(minL, maxL) to (cy - h / 2f).coerceIn(minT, maxT)
+    }
+
+    /** Records the panel bounds and starts its see-through layer (the log above it included). */
+    private fun beginPanel(c: Canvas, left: Float, top: Float, w: Float, h: Float) {
+        panelRect.set(left, top, left + w, top + h)
+        panelDrawn = true
+        val alpha = (255 * previewOpacity * panelFade).toInt().coerceIn(0, 255)
+        panelLayer = c.saveLayerAlpha(left - dp(2f), top - dp(LOG_ROOM_DP), left + w + dp(2f), top + h + dp(2f), alpha)
+    }
+
+    /** Tells the drag handle where the panel is (after the frame, never during drawing). */
+    private fun reportPanel() {
+        if (panelDrawn) {
+            if (!panelReported || reportedPanel != panelRect) {
+                reportedPanel.set(panelRect)
+                panelReported = true
+                val r = RectF(panelRect)
+                post { onPanelRect?.invoke(r) }
+            }
+        } else if (panelReported) {
+            panelReported = false
+            post { onPanelRect?.invoke(null) }
+        }
+    }
+
+    /** Draws the tracking panel; returns whether its fade is still moving. */
+    private fun drawTracking(c: Canvas, t: Long, dt: Float): Boolean {
+        val over = pointerAlpha > 0.1f && panelReported && dragCx.isNaN() &&
+            px in (reportedPanel.left - dp(28f))..(reportedPanel.right + dp(28f)) &&
+            py in (reportedPanel.top - dp(28f))..(reportedPanel.bottom + dp(28f))
+        val fadeTarget = if (over) PANEL_UNDER_CURSOR else 1f
+        panelFade = approach(panelFade, fadeTarget, dt / 220f)
+        panelLayer = -1
         if (trackingView == TrackingView.DIAGNOSTICS) drawDiagnostics(c, t) else drawCompact(c, t)
+        if (panelLayer >= 0) c.restoreToCount(panelLayer)
+        panelLayer = -1
+        return panelFade != fadeTarget
     }
 
     /** The everyday tracking view: the hand in the camera, the hand-safe region and one status line. */
@@ -825,9 +1319,9 @@ class OverlayView(context: Context) : View(context) {
         val boxH = boxW / aspect
         val lineH = dp(24f)
         val h = pad + boxH + lineH
-        val bottom = height - bottomInset - dp(12f)
-        val top = bottom - h
-        val left = panelLeftFor(w, top, bottom, t)
+        val (left, top) = panelOrigin(w, h)
+        val bottom = top + h
+        beginPanel(c, left, top, w, h)
         rect.set(left, top, left + w, bottom)
         fill.shader = null
         fill.color = Palette.SURFACE
@@ -870,9 +1364,9 @@ class OverlayView(context: Context) : View(context) {
         val factorsH = dp(30f)
         val sparkH = dp(36f)
         val h = pad + rowH + boxH + dp(4f) + rowH + dp(4f) + meterH * 5 + factorsH + dp(4f) + sparkH + pad
-        val bottom = height - bottomInset - dp(12f)
-        val top = bottom - h
-        val left = panelLeftFor(w, top, bottom, t)
+        val (left, top) = panelOrigin(w, h)
+        val bottom = top + h
+        beginPanel(c, left, top, w, h)
         val ix = left + pad
 
         stroke.shader = null
@@ -1037,7 +1531,8 @@ class OverlayView(context: Context) : View(context) {
         val lh = dp(12f)
         val pad = dp(8f)
         val h = live.size * lh + 2 * pad - dp(2f)
-        rect.set(left, panelTop - dp(6f) - h, left + w, panelTop - dp(6f))
+        // Above the drag handle, which sits on the panel's top edge.
+        rect.set(left, panelTop - dp(LOG_GAP_DP) - h, left + w, panelTop - dp(LOG_GAP_DP))
         fill.color = Palette.SURFACE
         fill.alpha = 240
         c.drawRoundRect(rect, dp(10f), dp(10f), fill)
@@ -1084,6 +1579,24 @@ class OverlayView(context: Context) : View(context) {
         /** The glow drifts slowly; 30 fps is plenty and halves the GPU cost on 60/120 Hz screens. */
         const val GLOW_FRAME_MS = 33L
         const val COMPACT_WIDTH_DP = 132f
+        /** Glow: the charge level while 🤟 is held, the lap when control turns on, the drain when it turns off, the action pulse. */
+        const val CHARGE_LEVEL = 0.55f
+        const val LAP_MS = 650L
+        const val DRAIN_MS = 450L
+        const val PULSE_MS = 240L
+        /** No hand while on: the pill with the countdown shows after this; the engine's grace before "hand lost". */
+        const val LOST_PILL_AFTER_MS = 2000L
+        const val HAND_LOST_GRACE_MS = 350L
+        const val POP_MS = 180L
+        const val GHOST_MS = 1000L
+        const val EDGE_CHIP_MS = 800L
+        /** Edge bitmask of [ControlEvent.Pointer.edge] and the side of the ring it is drawn on (degrees, 0 = right). */
+        val EDGE_ANGLES = listOf(1 to 180f, 2 to 270f, 4 to 0f, 8 to 90f)
+        /** Panel: the opacity factor while the cursor is over it; room kept above it for the handle and the log. */
+        const val PANEL_UNDER_CURSOR = 0.35f
+        const val PANEL_TOP_ROOM_DP = 20f
+        const val LOG_GAP_DP = 20f
+        const val LOG_ROOM_DP = 120f
         const val PUSH_FEEDBACK_FROM = 0.35f
         /** Tap windows of the engine and Android's long-press delay, for the hold ring. */
         const val TAP_HOLD_MS = 300L

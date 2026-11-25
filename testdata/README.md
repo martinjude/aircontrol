@@ -88,6 +88,24 @@ scripts/.venv/bin/python -I scripts/extract-clips.py --fps 15   # plus a 15 fps 
 ```
 Clips land in `app/src/test/resources/clips/<device>/`.
 
+### Hard conditions (degraded copies)
+The clips show what MediaPipe sees in your room. To see what happens in worse conditions without
+filming again, the script can degrade every frame before running the models:
+```sh
+scripts/.venv/bin/python -I scripts/extract-clips.py --augment all --samples /tmp/aircontrol-samples
+scripts/.venv/bin/python -I scripts/extract-clips.py --augment dark,lowres     # only some variants
+```
+Variants: `dark` (underexposed, with sensor noise), `bright` (overexposed), `noise`, `blur` (motion
+blur), `lowres` (240 px camera), `jpeg` (heavy compression, like a weak network stream) and `hard`
+(dark + lowres + jpeg). They land in `clips/<device>~<variant>/` and are not committed: rebuild them
+from the videos when needed. Each variant takes about as long as the original extraction.
+`--samples DIR` writes one picture per variant so you can check what each looks like.
+
+This doesn't retrain MediaPipe (its models are fixed). It shows how its landmarks degrade (missed
+hands, jitter, phantom hands) and what that does to the engine. The replay report ends with a table
+per folder (hand seen, recall, false actions per minute), and degraded clips list their reject
+reasons like the others. Degraded clips are reported but don't fail the test.
+
 ## 3. Replay
 ```sh
 ./gradlew testDebugUnitTest --tests '*ClipReplayTest*' -Pclips=          # report for all clips

@@ -13,7 +13,8 @@ import java.io.File
  *
  * `./gradlew testDebugUnitTest --tests '*ClipReplayTest*' -Pclips=` prints the report; a value
  * (`-Pclips=click_`) only replays clips whose name contains it. Each click candidate's reject reason
- * and confidence factors are listed for the failing clips.
+ * and confidence factors are listed for the failing clips. Degraded copies (`clips/<device>~<variant>/`,
+ * from `extract-clips.py --augment`) are replayed and summarised per folder but don't fail the test.
  */
 class ClipReplayTest {
 
@@ -69,12 +70,42 @@ class ClipReplayTest {
         if (pos.isNotEmpty()) line("positives: %d clips, recall %d/%d (%.0f %%)".format(pos.size, hit, wanted, 100.0 * hit / wanted.coerceAtLeast(1)))
         val failed = results.filter { !it.ok }
         line("${results.size - failed.size}/${results.size} clips as expected")
+        summaryByFolder(results, ::line)
 
         val report = out.toString()
         println(report)
         File("build/reports").apply { mkdirs() }.resolve("clips.txt").writeText(report)
-        if (failed.isNotEmpty() || gateFailures.isNotEmpty()) {
-            fail("${failed.size + gateFailures.size} clip check(s) failed:\n" + (failed.map { "  " + row(it) } + gateFailures).joinToString("\n"))
+        // Degraded copies (folders named <device>~<variant>) are reported, not required to pass.
+        val required = failed.filter { !it.clip.degraded }
+        if (required.isNotEmpty() || gateFailures.isNotEmpty()) {
+            fail("${required.size + gateFailures.size} clip check(s) failed:\n" + (required.map { "  " + row(it) } + gateFailures).joinToString("\n"))
+        }
+    }
+
+    /**
+     * One line per clip folder: how often MediaPipe saw a hand, recall, false actions per minute and
+     * clips as expected. With degraded copies (`tab~dark`, `tab~lowres`, ...) this shows what each
+     * condition costs next to the original recordings.
+     */
+    private fun summaryByFolder(results: List<ClipRunner.Result>, line: (String) -> Unit) {
+        val folders = results.groupBy { it.clip.device }.toSortedMap()
+        if (folders.size < 2) return
+        line("")
+        line("%-24s %9s %14s %10s %12s".format("folder", "hand seen", "recall", "false/min", "as expected"))
+        for ((folder, rs) in folders) {
+            val frames = rs.sumOf { it.clip.frames.size }
+            val withHand = rs.sumOf { r -> r.clip.frames.count { it.hands.isNotEmpty() } }
+            val pos = rs.filter { !it.clip.negative }
+            val wanted = pos.sumOf { r -> r.clip.expect.values.sum() }
+            val hit = pos.sumOf { r -> r.clip.expect.entries.sumOf { (k, v) -> minOf(v, r.counts[k] ?: 0) } }
+            val neg = rs.filter { it.clip.negative }
+            val negMin = neg.sumOf { it.clip.durationMs } / 60_000.0
+            val falseActions = neg.sumOf { r -> Expectation.ACTIONS.sumOf { r.counts[it] ?: 0 } }
+            line("%-24s %8.0f %% %6d/%-3d %3.0f %% %10s %8d/%d".format(
+                folder, 100.0 * withHand / frames.coerceAtLeast(1), hit, wanted, 100.0 * hit / wanted.coerceAtLeast(1),
+                if (neg.isEmpty()) "–" else "%.1f".format(falseActions / negMin.coerceAtLeast(1e-6)),
+                rs.count { it.ok }, rs.size,
+            ))
         }
     }
 

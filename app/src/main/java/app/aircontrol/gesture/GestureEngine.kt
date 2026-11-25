@@ -120,6 +120,11 @@ class GestureEngine(config: EngineConfig, private val emit: (ControlEvent) -> Un
     private var calPrevT = 0L
     private var calLastEmit = 0L
     private var calHover = 0f
+    /** Time left before measuring starts (the instruction can be read), and in the pause after an air-plane point. */
+    private var calReadyLeft = 0L
+    private var calDoneLeft = 0L
+    private var calSeqIndex = 0
+    private var calSeqSize = 1
     private val calValues = ArrayList<Float>()
     private val calNormals = ArrayList<P3>()
     private val calFaces = ArrayList<FaceObservation>()
@@ -168,9 +173,17 @@ class GestureEngine(config: EngineConfig, private val emit: (ControlEvent) -> Un
 
     fun disarmNow(reason: DisarmReason = DisarmReason.MANUAL) = disarm(reason)
 
-    /** Starts a calibration: the hand angle (needs a hand), the air plane (hand, 5 points) or attention (needs a face). */
-    fun startCalibration(kind: CalibrationKind) {
+    /**
+     * Starts a calibration: the hand angle (needs a hand), the air plane (hand, 5 points) or attention (needs a face).
+     * Nothing is measured for the first [readyMs] (the user reads what to do). [sequenceIndex] of
+     * [sequenceSize] is shown when several calibrations run one after the other.
+     */
+    fun startCalibration(kind: CalibrationKind, sequenceIndex: Int = 0, sequenceSize: Int = 1, readyMs: Long = CAL_READY_MS) {
         calibrating = kind
+        calSeqIndex = sequenceIndex
+        calSeqSize = sequenceSize
+        calReadyLeft = readyMs
+        calDoneLeft = 0L
         calStep = 0
         calPhase = 0
         calStartT = lastT
@@ -188,7 +201,8 @@ class GestureEngine(config: EngineConfig, private val emit: (ControlEvent) -> Un
     fun cancelCalibration() {
         val kind = calibrating ?: return
         calibrating = null
-        emit(ControlEvent.Calibration(kind, calStep, 0f, "Calibration cancelled", done = true, result = null))
+        emit(ControlEvent.Calibration(kind, calStep, 0f, "Calibration cancelled", done = true, result = null,
+            stepCount = stepCount(kind), sequenceIndex = calSeqIndex, sequenceSize = calSeqSize))
     }
 
     private fun boundPose(p: Pose, cfg: EngineConfig) =
@@ -604,6 +618,28 @@ class GestureEngine(config: EngineConfig, private val emit: (ControlEvent) -> Un
         val kind = calibrating ?: return
         val dt = (t - calPrevT).coerceIn(0L, 200L)
         calPrevT = t
+        if (calDoneLeft > 0L) {
+            calDoneLeft -= dt
+            if (calDoneLeft <= 0L) {
+                calDoneLeft = 0L
+                calReadyLeft = CAL_NEXT_POINT_MS
+                emitCalibration(0f)
+            }
+            calStartT += dt
+            return
+        }
+        if (calReadyLeft > 0L) {
+            // The timeout only counts once measuring starts.
+            calReadyLeft -= dt
+            calStartT += dt
+            if (calReadyLeft <= 0L) {
+                calReadyLeft = 0L
+                emitCalibration(0f)
+            } else {
+                maybeEmitCalibration(t, 0f)
+            }
+            return
+        }
         if (t - calStartT > if (kind == CalibrationKind.PUSH) CAL_PUSH_TIMEOUT_MS else CAL_TIMEOUT_MS) {
             finishCalibration(kind, null, if (kind == CalibrationKind.ATTENTION) "No face seen" else "No steady hand seen")
             return
@@ -677,7 +713,7 @@ class GestureEngine(config: EngineConfig, private val emit: (ControlEvent) -> Un
                 if (plane - calHover < MIN_PUSH_DEPTH) {
                     calValues.clear()
                     calStepMs = 0L
-                    emit(ControlEvent.Calibration(CalibrationKind.PUSH, calStep, 0f, "Push a little further toward the screen", targetX = tu, targetY = tv))
+                    emitCalibration(0f, "Push a little further toward the screen")
                     return
                 }
                 // The touch triggers a little before the full push, so it is reachable without straining.
@@ -689,6 +725,8 @@ class GestureEngine(config: EngineConfig, private val emit: (ControlEvent) -> Un
                 if (calStep >= PushCalibration.TARGETS.size) {
                     finishCalibration(CalibrationKind.PUSH, calResult.toFloatArray(), "Air push calibrated")
                 } else {
+                    // A short pause so the finished point can be seen before the next dot.
+                    calDoneLeft = CAL_STEP_DONE_MS
                     emitCalibration(0f)
                 }
             } else {
@@ -701,30 +739,58 @@ class GestureEngine(config: EngineConfig, private val emit: (ControlEvent) -> Un
         if (t - calLastEmit > CAL_EMIT_MS) emitCalibration(progress)
     }
 
-    private fun emitCalibration(progress: Float) {
+    private fun emitCalibration(progress: Float, override: String? = null) {
         val kind = calibrating ?: return
         calLastEmit = lastT
+        val phase = when {
+            calDoneLeft > 0L -> CalPhase.STEP_DONE
+            calReadyLeft > 0L -> CalPhase.READY
+            kind == CalibrationKind.PUSH && calPhase == 1 -> CalPhase.PUSH
+            else -> CalPhase.HOLD
+        }
         var tx = -1f
         var ty = -1f
-        val msg = when (kind) {
-            CalibrationKind.HAND -> "Hold your hand as you use it, palm toward the screen"
-            CalibrationKind.ATTENTION -> "Look at the dot in the centre of the screen"
-            CalibrationKind.PUSH -> {
-                val (u, v) = PushCalibration.TARGETS[calStep]
-                tx = u; ty = v
-                val n = "${calStep + 1}/${PushCalibration.TARGETS.size}"
-                if (calPhase == 0) "$n  Point at the dot and hold still" else "$n  Push toward the screen as if touching it, and hold"
+        if (kind == CalibrationKind.PUSH) {
+            // After a point, the finished one; otherwise the one to point at.
+            val i = if (phase == CalPhase.STEP_DONE) calStep - 1 else calStep
+            val (u, v) = PushCalibration.TARGETS[i.coerceIn(0, PushCalibration.TARGETS.size - 1)]
+            tx = u; ty = v
+        }
+        val msg = override ?: when (kind) {
+            CalibrationKind.HAND -> when (phase) {
+                CalPhase.READY -> "Hold your hand up as you normally use it, palm toward the screen"
+                else -> "Hold still"
+            }
+            CalibrationKind.ATTENTION -> when (phase) {
+                CalPhase.READY -> "Look at the dot in the centre of the screen and keep looking"
+                else -> "Keep looking at the dot"
+            }
+            CalibrationKind.PUSH -> when (phase) {
+                CalPhase.READY -> if (calStep == 0) "At each dot: point at it and hold still, then push toward the screen as if touching it"
+                    else "Move to the next dot"
+                CalPhase.HOLD -> "Point at the dot and hold still"
+                CalPhase.PUSH -> "Now push toward the screen and hold"
+                CalPhase.STEP_DONE -> "Got it"
             }
         }
         val overall = if (kind == CalibrationKind.PUSH) {
-            (calStep + (calPhase + progress.coerceIn(0f, 1f)) / 2f) / PushCalibration.TARGETS.size
-        } else progress
-        emit(ControlEvent.Calibration(kind, calStep, overall.coerceIn(0f, 1f), msg, targetX = tx, targetY = ty))
+            if (phase == CalPhase.HOLD || phase == CalPhase.PUSH) {
+                (calStep + (calPhase + progress.coerceIn(0f, 1f)) / 2f) / PushCalibration.TARGETS.size
+            } else calStep.toFloat() / PushCalibration.TARGETS.size
+        } else if (phase == CalPhase.READY) 0f else progress
+        emit(ControlEvent.Calibration(
+            kind, calStep, overall.coerceIn(0f, 1f), msg, targetX = tx, targetY = ty,
+            phase = phase, countdownMs = if (phase == CalPhase.READY) calReadyLeft else 0L,
+            stepCount = stepCount(kind), sequenceIndex = calSeqIndex, sequenceSize = calSeqSize,
+        ))
     }
+
+    private fun stepCount(kind: CalibrationKind) = if (kind == CalibrationKind.PUSH) PushCalibration.TARGETS.size else 1
 
     private fun finishCalibration(kind: CalibrationKind, result: FloatArray?, msg: String) {
         calibrating = null
-        emit(ControlEvent.Calibration(kind, calStep, 1f, msg, done = true, result = result))
+        emit(ControlEvent.Calibration(kind, calStep, 1f, msg, done = true, result = result,
+            stepCount = stepCount(kind), sequenceIndex = calSeqIndex, sequenceSize = calSeqSize))
     }
 
     // ---------------------------------------------------------------- helpers
@@ -897,6 +963,11 @@ class GestureEngine(config: EngineConfig, private val emit: (ControlEvent) -> Un
         const val CAL_ATTENTION_MS = 3000L
         const val CAL_HOVER_MS = 800L
         const val CAL_PRESS_MS = 900L
+        /** Time to read the instruction before a calibration measures anything. */
+        const val CAL_READY_MS = 3000L
+        /** Air plane: the pause after a point (it shows as done), then the time to move to the next dot. */
+        const val CAL_STEP_DONE_MS = 700L
+        const val CAL_NEXT_POINT_MS = 1000L
         /** Cursor within this distance (normalized screen) of the dot counts as pointing at it. */
         const val CAL_TARGET_RADIUS = 0.14f
         const val CAL_STILL_SPEED = 1.2f

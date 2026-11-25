@@ -20,8 +20,8 @@ android {
         applicationId = "app.aircontrol"
         minSdk = 29
         targetSdk = 36
-        versionCode = 5
-        versionName = "2.3.0"
+        versionCode = 6
+        versionName = "2.4.0"
         // Pixel 8 and current Galaxy Tabs are 64-bit ARM; keeps the APK small.
         ndk { abiFilters += "arm64-v8a" }
     }

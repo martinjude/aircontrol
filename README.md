@@ -3,8 +3,10 @@
 Hands-free control of an Android phone or tablet with upper-body, hand and finger gestures, using
 the front/back camera or a network (IP) camera. Everything runs on the device.
 
-- **🤟 hold 1 s** turns gesture mode on. A glowing border around the screen shows that AirControl is
-  in control. Hold 🤟 again to turn it off; it also turns off after 20 s without a hand.
+- **🤟 hold 1 s** turns gesture mode on. While you hold it the screen edge fills up from the bottom;
+  when control turns on, light runs up both sides and a glowing border stays while AirControl is in
+  control. Hold 🤟 again to turn it off (the glow drains away). Without a hand the glow dims and a
+  message counts down to auto-off (20 s by default).
 - **The cursor follows the centre of your palm** inside a *hand-safe frame*: the part of the camera
   view where the palm can be while the whole hand (raised fingers included) stays in view. That frame
   spans the screen, so the corners are reachable without the index leaving the camera. It scales with
@@ -13,7 +15,7 @@ the front/back camera or a network (IP) camera. Everything runs on the device.
   - **Finger tap 👌**: touch thumb and index tips quickly → click where the cursor was. Keep them
     together → finger on the screen: move to drag/scroll, stay still for a long press.
   - **Air push 👉**: push your hand toward the screen through an invisible plane parallel to the
-    camera. A soft glow under the cursor grows as you get close; pushing through touches, pulling
+    camera. A ring closes in on the cursor as you get close; pushing through touches, pulling
     back releases. While pushed in the cursor moves slowly (0.35×) for precise drags. *Calibration →
     Air plane* measures the plane at 5 screen points so it is fixed to the camera.
   - Every tap or push is scored (palm angle, steady hand, other fingers still, a quick deliberate
@@ -26,6 +28,9 @@ the front/back camera or a network (IP) camera. Everything runs on the device.
 - **Pointer confidence**: a full ring is trusted; a thin arc shows the confidence when it drops (palm
   angle, shaky tracking, frame edge, gaze). A green dot above the ring means your eyes are on the
   screen (after the gaze calibration; *Only click when I look at the screen* can also block clicks).
+  The ring tightens as thumb and index close, is dashed grey during the pause after a pose, red with
+  a slash when the palm angle blocks taps, and shows an orange arc on the side where the hand reaches
+  the edge of what the camera can follow.
 - **Swipe = open palm held still, then flicked** left/right/up/down. Distances are in palm sizes, a
   flick that leaves the frame still counts, and the return stroke is ignored.
 - **Binds** (Binds tab): hold a hand pose to trigger an action. One hand or two hands together,
@@ -47,7 +52,7 @@ was tested on a Pixel 8 and a Pixel 8-class emulator running Android 17.
    ```sh
    export PATH=/opt/homebrew/share/android-commandlinetools/platform-tools:$PATH
    adb devices                                  # accept the prompt on the device
-   adb install -r dist/AirControl-2.3.0.apk
+   adb install -r dist/AirControl-2.4.0.apk
    ```
    For Wireless debugging use `adb pair <ip>:<pair-port>` then `adb connect <ip>:<port>`.
 
@@ -95,19 +100,25 @@ the image is sideways.
 
 ## Settings worth knowing
 - **Calibration**: *Calibrate everything* runs hand angle → air plane (5 points) → gaze; each can
-  also be run alone or cleared.
+  also be run alone or cleared. A card explains each step and counts down before anything is
+  measured; the notification has *Stop calibration*.
 - **Pointer**: cursor speed (gain of the hand-safe frame), smoothing, hand angle tolerance.
 - **Click and hold**: method (finger tap / air push / both), strictness, click length (shorter touch
   = click, longer = hold), pause after a pose, *only click when I look at the screen*.
 - **Air push**: drag speed while pushed in; push depth for the uncalibrated floating plane.
 - **Swipes**: on/off, flick sensitivity, swipe length.
 - **Detection**: auto-off, require a person in view, upper-body tracking, swap left/right, processor.
+- **Look**: glow colour; tracking view (off / compact / diagnostics), its opacity (70 % by default) and
+  position: drag the handle on the panel's top edge, double-tap it to put the panel back. The panel
+  lets taps through and fades while the cursor is over it.
 - Every slider shows a reset button when it differs from its default.
 
 ## Gesture test clips
 Record short videos of real gestures, extract their landmarks once on the Mac, and every engine change
 is checked against them (`ClipReplayTest`): see [testdata/README.md](testdata/README.md) for the list
 of videos, the naming rules (the file name says what must happen) and the commands.
+`extract-clips.py --augment all` also makes degraded copies (dark, overexposed, noisy, blurred, low
+resolution, heavy compression) to see how bad conditions affect tracking; they stay out of git.
 
 ## Build from source
 Requirements (already installed on this Mac): JDK 17 (`brew install openjdk@17`) and the Android
